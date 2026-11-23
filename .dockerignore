@@ -1,0 +1,12 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.env
+*.session
+*.session-journal
+bot_session.session
+.git
+.gitignore
+.dockerignore
+TG-Auto-Posting-Bot-main
