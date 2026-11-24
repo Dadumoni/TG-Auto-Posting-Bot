@@ -32,7 +32,7 @@ SESSION_STRING = os.getenv("SESSION_STRING", "").strip()
 
 # MongoDB Configuration
 MONGO_URI = os.getenv("MONGO_URI", "")
-DB_NAME = os.getenv("DB_NAME", "telegram_bot_db")
+DB_NAME = os.getenv("DB_NAME", "autoposter_userbot_db")
 
 # Admin Configuration
 try:
