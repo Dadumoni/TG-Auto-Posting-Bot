@@ -19,7 +19,7 @@ from bot.database import (
     update_group_cooldown,
     generate_group_post,
 )
-from bot.utils import resolve_chat_entity, notify_admin
+from bot.utils import resolve_chat_entity, notify_admin, diagnose_group_failure
 
 # Posting lock to ensure only one post runs at any given time
 posting_lock = asyncio.Lock()
@@ -114,24 +114,33 @@ async def post_to_single_group(
             await notify_admin(err_msg)
 
         except FloodWaitError as e:
-            next_post_at = time.time() + e.seconds + random.randint(30, 90)
-            err_msg = (
-                f"❌ **Post Failed (FloodWait)!**\n\n"
-                f"📌 **Group:** {group_title}\n"
-                f"🆔 **ID:** `{chat_id}`\n"
-                f"⏱️ **Wait Required:** `{e.seconds}` seconds"
+            # Reschedule far in advance (6 hours)
+            next_post_at = time.time() + 21600
+            logger.error(f"FAILED: Post to '{group_title}' ({chat_id}) - FloodWait: {e.seconds}s. Enforcing 6-hour emergency lock.")
+            from bot.services.emergency import trigger_flood_emergency_lock
+            await trigger_flood_emergency_lock(
+                flood_wait_seconds=e.seconds,
+                group_title=group_title,
+                chat_id=chat_id,
             )
-            logger.error(f"FAILED: Post to '{group_title}' ({chat_id}) - FloodWait: {e.seconds}s")
-            await notify_admin(err_msg)
 
         except Exception as e:
+            logger.error(f"FAILED: Post to '{group_title}' ({chat_id}) - {type(e).__name__}: {str(e)}")
+            diag = await diagnose_group_failure(chat_id, e)
+            star_badge = " ⭐ (Paid Messages Required)" if diag.get("stars_detected") else ""
+            banned_badge = " 🚫 (Banned / Kicked)" if diag.get("banned") else ""
+
             err_msg = (
-                f"❌ **Post Failed!**\n\n"
+                f"❌ **Post Failed to Group!**{star_badge}{banned_badge}\n\n"
                 f"📌 **Group:** {group_title}\n"
-                f"🆔 **ID:** `{chat_id}`\n"
-                f"⚠️ **Error:** `{str(e)}`"
+                f"🆔 **ID:** `{chat_id}`\n\n"
+                f"🔍 **Diagnostic Inspection:**\n"
+                f"• **Cause:** {diag['reason']}\n"
+                f"• **Details:** {diag['description']}\n"
+                f"• **Raw Error:** `{type(e).__name__}: {str(e)}`\n\n"
+                f"💡 **Recommended Action:**\n"
+                f"{diag['recommendation']}"
             )
-            logger.error(f"FAILED: Post to '{group_title}' ({chat_id}) - {str(e)}")
             await notify_admin(err_msg)
 
         finally:
