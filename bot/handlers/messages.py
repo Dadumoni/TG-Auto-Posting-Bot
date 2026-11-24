@@ -1,4 +1,5 @@
 from telethon import events, utils
+from bot.handlers.commands import is_user_waiting_input
 from bot.handlers.groups import process_add_group
 from bot.utils import parse_chat_target
 
@@ -9,6 +10,10 @@ def register_message_handlers(bot):
     @bot.on(events.NewMessage(incoming=True))
     async def auto_link_and_forward_detector(event):
         if not event.is_private:
+            return
+
+        # Do not process as group add if user is currently configuring links in /set_message
+        if is_user_waiting_input(event.sender_id):
             return
 
         try:

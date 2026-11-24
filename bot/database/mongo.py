@@ -1,3 +1,4 @@
+import random
 import time
 from typing import List, Dict, Any, Optional
 from pymongo import MongoClient
@@ -61,80 +62,176 @@ def set_bot_posting_status(active: bool) -> bool:
         return False
 
 
-def _resolve_config_type(msg_type: str) -> str:
-    """Normalize message type key for MongoDB config collection."""
-    clean_type = (msg_type or "").lower().strip()
-    if clean_type in ["tme", "t_me", "t.me"]:
-        return "post_message_tme"
-    if clean_type in ["domain", "ext", "external"]:
-        return "post_message_domain"
-    return "post_message"
+# Selected emoji pool for randomized human-like post variation per group
+EMOJI_POOL = [
+    "👇", "😍", "🥵", "✅", "👁", "😱", "😈", "☠️",
+    "🐱", "🐙", "🌝", "💦", "🍑", "🍓", "📌", "❤️", "🔥",
+]
 
 
-def get_custom_message(msg_type: str = "default") -> str:
-    """
-    Retrieve the configured post message.
-    If a specific type (e.g. t_me or domain) is requested but not set,
-    falls back to the default post_message.
-    """
+def clean_url_format(url: str) -> str:
+    """Ensure URL is properly formatted with https:// prefix."""
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    if not raw.startswith("http://") and not raw.startswith("https://"):
+        return f"https://{raw}"
+    return raw
+
+
+def get_link_db(link_type: str) -> Optional[str]:
+    """Retrieve configured URL for link_type ('t_me' or 'domain')."""
     if config_collection is None:
-        return "Custom post message is not configured. Please use /set_message first."
-
-    target_type = _resolve_config_type(msg_type)
+        return None
+    clean_type = "domain" if (link_type or "").lower() in ["domain", "ext", "external"] else "t_me"
     try:
-        # Try specific type first
-        if target_type != "post_message":
-            specific_cfg = config_collection.find_one({"type": target_type})
-            if specific_cfg and specific_cfg.get("text"):
-                return specific_cfg["text"]
+        doc = config_collection.find_one({"type": f"link_{clean_type}"})
+        if doc and doc.get("url"):
+            return clean_url_format(doc["url"])
 
-        # Fallback to default post_message
-        default_cfg = config_collection.find_one({"type": "post_message"})
-        if default_cfg and default_cfg.get("text"):
-            return default_cfg["text"]
+        # Fallback to legacy post_message keys if present
+        legacy_key = "post_message_domain" if clean_type == "domain" else "post_message_tme"
+        leg_doc = config_collection.find_one({"type": legacy_key})
+        if leg_doc and leg_doc.get("text"):
+            for word in leg_doc["text"].split():
+                if "t.me" in word or "http" in word or "." in word:
+                    return clean_url_format(word)
     except Exception as e:
-        logger.error(f"Error reading custom message ({msg_type}) from DB: {e}")
+        logger.error(f"Error fetching link ({link_type}) from DB: {e}")
+    return None
 
-    return "Custom post message is not configured. Please use /set_message first."
 
-
-def set_custom_message(text: str, msg_type: str = "default") -> bool:
-    """Save or update custom post message by type (default, t_me, or domain)."""
+def set_link_db(link_type: str, url: str) -> bool:
+    """Save or update URL for link_type ('t_me' or 'domain')."""
     if config_collection is None:
-        logger.error("Cannot set custom message: MongoDB is not connected.")
+        logger.error("Cannot set link: MongoDB is not connected.")
         return False
-
-    target_type = _resolve_config_type(msg_type)
+    clean_type = "domain" if (link_type or "").lower() in ["domain", "ext", "external"] else "t_me"
+    formatted_url = clean_url_format(url)
     try:
         config_collection.update_one(
-            {"type": target_type},
-            {"$set": {"text": text, "updated_at": time.time()}},
+            {"type": f"link_{clean_type}"},
+            {"$set": {"url": formatted_url, "updated_at": time.time()}},
+            upsert=True,
+        )
+        # Update legacy key for backward compatibility
+        legacy_key = "post_message_domain" if clean_type == "domain" else "post_message_tme"
+        config_collection.update_one(
+            {"type": legacy_key},
+            {"$set": {"text": formatted_url, "updated_at": time.time()}},
             upsert=True,
         )
         return True
     except Exception as e:
-        logger.error(f"Error updating custom message ({target_type}) in DB: {e}")
+        logger.error(f"Error setting link ({clean_type}) in DB: {e}")
         return False
 
 
-def get_all_custom_messages() -> Dict[str, Optional[str]]:
-    """Retrieve all configured custom messages."""
-    result: Dict[str, Optional[str]] = {"default": None, "t_me": None, "domain": None}
+def get_base_text_db() -> str:
+    """Retrieve base header text for posts."""
     if config_collection is None:
-        return result
+        return ""
     try:
-        for doc in config_collection.find({"type": {"$in": ["post_message", "post_message_tme", "post_message_domain"]}}):
-            dtype = doc.get("type")
-            text = doc.get("text")
-            if dtype == "post_message":
-                result["default"] = text
-            elif dtype == "post_message_tme":
-                result["t_me"] = text
-            elif dtype == "post_message_domain":
-                result["domain"] = text
+        doc = config_collection.find_one({"type": "base_text"})
+        if doc and doc.get("text") is not None:
+            return doc["text"].strip()
+
+        # Legacy fallback
+        doc_legacy = config_collection.find_one({"type": "post_message"})
+        if doc_legacy and doc_legacy.get("text"):
+            txt = doc_legacy["text"].strip()
+            # If legacy text is not just a bare URL, return it
+            if not txt.startswith("http://") and not txt.startswith("https://"):
+                return txt
     except Exception as e:
-        logger.error(f"Error fetching all custom messages: {e}")
-    return result
+        logger.error(f"Error fetching base text from DB: {e}")
+    return ""
+
+
+def set_base_text_db(text: str) -> bool:
+    """Save base header text for posts."""
+    if config_collection is None:
+        logger.error("Cannot set base text: MongoDB is not connected.")
+        return False
+    clean_text = (text or "").strip()
+    try:
+        config_collection.update_one(
+            {"type": "base_text"},
+            {"$set": {"text": clean_text, "updated_at": time.time()}},
+            upsert=True,
+        )
+        config_collection.update_one(
+            {"type": "post_message"},
+            {"$set": {"text": clean_text, "updated_at": time.time()}},
+            upsert=True,
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error saving base text to DB: {e}")
+        return False
+
+
+def generate_group_post(link_type: str = "t_me") -> str:
+    """
+    Generate dynamic post content for a group:
+    {custom text} (random emoji from selected pool)
+    \n\n
+    {link}
+    {link}
+    """
+    clean_type = "domain" if (link_type or "").lower() in ["domain", "ext", "external"] else "t_me"
+    custom_text = get_base_text_db()
+    link = get_link_db(clean_type)
+
+    if not link:
+        # Fallback to alternate link if requested type not configured
+        alt_type = "domain" if clean_type == "t_me" else "t_me"
+        link = get_link_db(alt_type)
+
+    if not link:
+        link = "https://t.me"
+
+    random_emoji = random.choice(EMOJI_POOL)
+    if custom_text:
+        header = f"{custom_text} {random_emoji}"
+    else:
+        header = f"{random_emoji}"
+
+    # Double new line after header, single new line between repeated links
+    return f"{header}\n\n{link}\n{link}"
+
+
+def get_custom_message(msg_type: str = "default") -> str:
+    """Retrieve dynamic generated post message for the specified link type."""
+    return generate_group_post(msg_type)
+
+
+def set_custom_message(text: str, msg_type: str = "default") -> bool:
+    """
+    Save or update custom post message or link based on type.
+    Maintains backward compatibility for /set_message command variants.
+    """
+    clean_type = (msg_type or "").lower().strip()
+    if clean_type in ["tme", "t_me", "t.me"]:
+        return set_link_db("t_me", text)
+    if clean_type in ["domain", "ext", "external"]:
+        return set_link_db("domain", text)
+    # If text is a URL, detect and save as link
+    stripped = text.strip()
+    if "t.me" in stripped:
+        return set_link_db("t_me", stripped)
+    if stripped.startswith("http://") or stripped.startswith("https://"):
+        return set_link_db("domain", stripped)
+    return set_base_text_db(text)
+
+
+def get_all_custom_messages() -> Dict[str, Optional[str]]:
+    """Retrieve all configured custom messages and links."""
+    return {
+        "default": get_base_text_db(),
+        "t_me": get_link_db("t_me"),
+        "domain": get_link_db("domain"),
+    }
 
 
 def is_group_exists(chat_id: int) -> bool:
