@@ -19,33 +19,22 @@ def register_base_commands(bot):
             return
         try:
             groups_count = len(get_all_groups_db())
-            status_icon = "🟢 Active (Running)" if is_posting_active() else "🔴 Stopped (Paused)"
+            status_icon = "🟢 Active" if is_posting_active() else "🔴 Stopped"
             await event.respond(
-                f"👋 **Welcome to Group Manager & Auto-Scheduler Bot!**\n\n"
-                f"⚡ **Bot Status:** {status_icon}\n"
-                f"📊 **Total Active Groups:** `{groups_count}`\n\n"
-                "**Control Commands:**\n"
-                "• `/stop` - Stop all auto-posting across all groups\n"
-                "• `/restart` - Resume/restart scheduled auto-posting\n\n"
-                "**Ways to Add Groups:**\n"
-                "1. Send a public or private Telegram link / @username.\n"
-                "2. Forward any message directly from the target group.\n"
-                "3. Use `/add_group <target>` command.\n\n"
-                "**Message Template Commands:**\n"
-                "• `/set_message <text>` - Set default post message\n"
-                "• `/set_tme_message <text>` - Set post message with t.me link only\n"
-                "• `/set_domain_message <text>` - Set post message with domain/external link\n"
-                "• `/get_message` - View all configured message templates\n\n"
-                "**Group Management Commands:**\n"
-                "• `/add_group <target>` - Add group (detects cooldown & sends initial post)\n"
-                "• `/remove_group <id>` - Remove a group from scheduler\n"
-                "• `/remove_all` - Clear all groups from database\n"
-                "• `/all_groups` - List scheduled groups, link types, and countdowns\n"
-                "• `/debug <target>` - Check Userbot access & slowmode cooldown"
+                f"👋 **Group Auto-Poster Bot**\n\n"
+                f"⚡ **Status:** {status_icon} | 📊 **Groups:** `{groups_count}`\n\n"
+                "📋 **Commands:**\n"
+                "• `/all_groups` - View scheduled groups & countdowns\n"
+                "• `/add_group <target>` - Add group (or forward message/link)\n"
+                "• `/remove_group <id>` - Remove a group\n"
+                "• `/set_message <text>` - Set post message\n"
+                "• `/get_message` - View message templates\n"
+                "• `/stop` / `/restart` - Pause / resume auto-posting\n"
+                "• `/debug <target>` - Test group access & slowmode"
             )
         except Exception as e:
             logger.error(f"Error in start_cmd: {e}")
-            await event.respond("❌ An error occurred while opening menu. Please verify database connectivity.")
+            await event.respond("❌ An error occurred. Please verify database connectivity.")
 
     @bot.on(events.NewMessage(pattern=r'(?i)^/stop(?:@\w+)?(?:\s|$)'))
     async def stop_cmd(event):

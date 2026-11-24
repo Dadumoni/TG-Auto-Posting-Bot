@@ -123,21 +123,10 @@ def register_group_handlers(bot):
 
             update_group_link_type(chat_id, chosen_type)
             type_label = "🔗 t.me only" if chosen_type == "t_me" else "🌐 Domain / External"
-            await event.answer(f"Saved: {type_label}")
+            await event.answer(f"✅ Policy Saved: {type_label}")
 
-            buttons = [
-                [
-                    Button.inline(f"{'✅ ' if chosen_type == 't_me' else ''}🔗 t.me only", data=f"linktype:{chat_id}:t_me"),
-                    Button.inline(f"{'✅ ' if chosen_type == 'domain' else ''}🌐 Domain / External", data=f"linktype:{chat_id}:domain"),
-                ]
-            ]
-            await event.edit(
-                f"📌 **Group Link Policy Configured!**\n\n"
-                f"🆔 **Chat ID:** `{chat_id}`\n"
-                f"📎 **Active Link Type:** **{type_label}**\n\n"
-                f"✅ Future scheduled posts to this group will use this link template.",
-                buttons=buttons,
-            )
+            # Delete the prompt message once configured
+            await event.delete()
         except Exception as e:
             logger.error(f"Error in link_type_callback: {e}")
 
