@@ -11,25 +11,29 @@ def register_message_handlers(bot):
         if not event.is_private:
             return
 
-        text = (event.raw_text or "").strip()
-        if not text or text.startswith('/'):
-            return
-
-        # Check for forwarded message from group or channel
-        if event.message.forward:
-            forward_info = event.message.forward
-            if getattr(forward_info, 'chat', None):
-                target_peer = utils.get_peer_id(forward_info.chat)
-                await process_add_group(event, target_peer, source_desc="(Forwarded message)")
-                return
-            elif getattr(forward_info, 'from_id', None):
-                target_peer = utils.get_peer_id(forward_info.from_id)
-                await process_add_group(event, target_peer, source_desc="(Forwarded message)")
+        try:
+            text = (event.raw_text or "").strip()
+            if not text or text.startswith('/'):
                 return
 
-        # Check for direct t.me link or @username
-        if 't.me/' in text or text.startswith('@'):
-            target_peer = parse_chat_target(text)
-            if target_peer:
-                await process_add_group(event, target_peer, source_desc="(Direct link/username)")
-                return
+            # Check for forwarded message from group or channel
+            if event.message.forward:
+                forward_info = event.message.forward
+                if getattr(forward_info, 'chat', None):
+                    target_peer = utils.get_peer_id(forward_info.chat)
+                    await process_add_group(event, target_peer, source_desc="(Forwarded message)")
+                    return
+                elif getattr(forward_info, 'from_id', None):
+                    target_peer = utils.get_peer_id(forward_info.from_id)
+                    await process_add_group(event, target_peer, source_desc="(Forwarded message)")
+                    return
+
+            # Check for direct t.me link or @username
+            if 't.me/' in text or text.startswith('@'):
+                target_peer = parse_chat_target(text)
+                if target_peer:
+                    await process_add_group(event, target_peer, source_desc="(Direct link/username)")
+                    return
+        except Exception as e:
+            from bot.config import logger
+            logger.error(f"Error in auto_link_and_forward_detector: {e}")

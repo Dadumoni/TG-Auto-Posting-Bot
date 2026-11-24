@@ -14,6 +14,15 @@ from bot.services import post_to_single_group, calculate_next_post_timestamp
 from bot.utils import parse_chat_target, resolve_chat_entity, detect_group_cooldown
 
 
+def escape_md(text: str) -> str:
+    """Strip markdown characters from group titles to prevent parsing failures."""
+    if not text:
+        return "Unknown"
+    for char in ['*', '_', '`', '[', ']', '~']:
+        text = text.replace(char, '')
+    return text.strip()
+
+
 async def process_add_group(event, raw_target, source_desc=""):
     """
     Resolve and save a target chat into the database, detect slowmode cooldown,
@@ -23,7 +32,8 @@ async def process_add_group(event, raw_target, source_desc=""):
     try:
         chat = await resolve_chat_entity(raw_target)
         chat_id = utils.get_peer_id(chat)
-        group_title = getattr(chat, 'title', getattr(chat, 'first_name', 'Target Group'))
+        raw_title = getattr(chat, 'title', getattr(chat, 'first_name', 'Target Group'))
+        group_title = escape_md(raw_title)
 
         if is_group_exists(chat_id):
             await status_msg.edit(
@@ -103,32 +113,35 @@ def register_group_handlers(bot):
     @bot.on(events.CallbackQuery(pattern=r'^linktype:(-?\d+):(\w+)'))
     async def link_type_callback(event):
         """Handle inline button selection for group supported link type."""
-        if ADMIN_ID != 0 and event.sender_id != ADMIN_ID:
-            await event.answer("⚠️ Unauthorized. Only the bot admin can configure link types.", alert=True)
-            return
+        try:
+            if ADMIN_ID != 0 and event.sender_id != ADMIN_ID:
+                await event.answer("⚠️ Unauthorized. Only the bot admin can configure link types.", alert=True)
+                return
 
-        chat_id = int(event.pattern_match.group(1))
-        chosen_type = event.pattern_match.group(2)  # 't_me' or 'domain'
+            chat_id = int(event.pattern_match.group(1))
+            chosen_type = event.pattern_match.group(2)  # 't_me' or 'domain'
 
-        update_group_link_type(chat_id, chosen_type)
-        type_label = "🔗 t.me only" if chosen_type == "t_me" else "🌐 Domain / External"
-        await event.answer(f"Saved: {type_label}")
+            update_group_link_type(chat_id, chosen_type)
+            type_label = "🔗 t.me only" if chosen_type == "t_me" else "🌐 Domain / External"
+            await event.answer(f"Saved: {type_label}")
 
-        buttons = [
-            [
-                Button.inline(f"{'✅ ' if chosen_type == 't_me' else ''}🔗 t.me only", data=f"linktype:{chat_id}:t_me"),
-                Button.inline(f"{'✅ ' if chosen_type == 'domain' else ''}🌐 Domain / External", data=f"linktype:{chat_id}:domain"),
+            buttons = [
+                [
+                    Button.inline(f"{'✅ ' if chosen_type == 't_me' else ''}🔗 t.me only", data=f"linktype:{chat_id}:t_me"),
+                    Button.inline(f"{'✅ ' if chosen_type == 'domain' else ''}🌐 Domain / External", data=f"linktype:{chat_id}:domain"),
+                ]
             ]
-        ]
-        await event.edit(
-            f"📌 **Group Link Policy Configured!**\n\n"
-            f"🆔 **Chat ID:** `{chat_id}`\n"
-            f"📎 **Active Link Type:** **{type_label}**\n\n"
-            f"✅ Future scheduled posts to this group will use this link template.",
-            buttons=buttons,
-        )
+            await event.edit(
+                f"📌 **Group Link Policy Configured!**\n\n"
+                f"🆔 **Chat ID:** `{chat_id}`\n"
+                f"📎 **Active Link Type:** **{type_label}**\n\n"
+                f"✅ Future scheduled posts to this group will use this link template.",
+                buttons=buttons,
+            )
+        except Exception as e:
+            logger.error(f"Error in link_type_callback: {e}")
 
-    @bot.on(events.NewMessage(pattern=r'^/add_group'))
+    @bot.on(events.NewMessage(pattern=r'(?i)^/add_group(?:@\w+)?(?:\s|$)'))
     async def add_group_cmd(event):
         if not event.is_private:
             return
@@ -142,7 +155,7 @@ def register_group_handlers(bot):
         raw_target = parse_chat_target(parts[1])
         await process_add_group(event, raw_target, source_desc="(/add_group command)")
 
-    @bot.on(events.NewMessage(pattern=r'^/remove_group'))
+    @bot.on(events.NewMessage(pattern=r'(?i)^/remove_group(?:@\w+)?(?:\s|$)'))
     async def remove_group_cmd(event):
         if not event.is_private:
             return
@@ -159,45 +172,66 @@ def register_group_handlers(bot):
             await event.respond(f"✅ Group `{chat_id}` has been removed from database and scheduler.")
         except ValueError:
             await event.respond("❌ Please provide a valid numeric Group ID.")
+        except Exception as e:
+            logger.error(f"Error in remove_group_cmd: {e}")
+            await event.respond(f"❌ Error removing group: `{e}`")
 
-    @bot.on(events.NewMessage(pattern=r'^/remove_all$'))
+    @bot.on(events.NewMessage(pattern=r'(?i)^/(?:remove_all|removeall)(?:@\w+)?(?:\s|$)'))
     async def remove_all_groups_cmd(event):
         if not event.is_private:
             return
-        result = remove_all_groups_db()
-        deleted_count = result.deleted_count if result else 0
-        await event.respond(f"✅ A total of **{deleted_count}** groups were removed from the database.")
+        try:
+            result = remove_all_groups_db()
+            deleted_count = result.deleted_count if result else 0
+            await event.respond(f"✅ A total of **{deleted_count}** groups were removed from the database.")
+        except Exception as e:
+            logger.error(f"Error in remove_all_groups_cmd: {e}")
+            await event.respond(f"❌ Error clearing groups: `{e}`")
 
-    @bot.on(events.NewMessage(pattern=r'^/all_groups$'))
+    @bot.on(events.NewMessage(pattern=r'(?i)^(?:/all_groups|/allgroups|all\s*groups)(?:@\w+)?(?:\s|$)'))
     async def all_groups_cmd(event):
         if not event.is_private:
             return
-        groups = get_all_groups_db()
-        total_count = len(groups)
-        if not groups:
-            await event.respond("📊 **Total Groups:** `0`\n📂 No groups are currently saved in the database.")
-            return
+        try:
+            groups = get_all_groups_db()
+            total_count = len(groups)
+            if not groups:
+                await event.respond("📊 **Total Groups:** `0`\n📂 No groups are currently saved in the database.")
+                return
 
-        status_header = "🟢 Status: Active (Posting Enabled)" if is_posting_active() else "🔴 Status: Paused via /stop"
-        text = f"📊 **Total Scheduled Groups:** `{total_count}` | {status_header}\n\n"
-        current_time = time.time()
-        for group in groups:
-            title = group.get("title", "Unknown")
-            cid = group.get("chat_id")
-            link_type = group.get("link_type", "t_me")
-            link_badge = "🔗 t.me only" if link_type == "t_me" else "🌐 Domain / External"
-            cooldown_val = group.get("cooldown_seconds", 0)
-            cooldown_badge = f"`{cooldown_val}s`" if cooldown_val > 0 else "`None`"
+            status_header = "🟢 Status: Active (Posting Enabled)" if is_posting_active() else "🔴 Status: Paused via /stop"
+            header = f"📊 **Total Scheduled Groups:** `{total_count}` | {status_header}\n\n"
+            current_time = time.time()
 
-            next_post_at = group.get("next_post_at", current_time)
-            remaining_secs = max(0, int(next_post_at - current_time))
-            time_left_mins = int(remaining_secs / 60)
+            chunk = header
+            for group in groups:
+                raw_title = group.get("title", "Unknown")
+                title = escape_md(raw_title)
+                cid = group.get("chat_id")
+                link_type = group.get("link_type", "t_me")
+                link_badge = "🔗 t.me only" if link_type == "t_me" else "🌐 Domain / External"
+                cooldown_val = group.get("cooldown_seconds", 0)
+                cooldown_badge = f"`{cooldown_val}s`" if cooldown_val > 0 else "`None`"
 
-            text += (
-                f"• **{title}** (`{cid}`)\n"
-                f"  ├ 📎 Policy: {link_badge}\n"
-                f"  ├ ⏱️ Cooldown: {cooldown_badge}\n"
-                f"  └ ⏳ Next Post: in ~{time_left_mins} mins ({remaining_secs}s)\n\n"
-            )
+                next_post_at = group.get("next_post_at", current_time)
+                remaining_secs = max(0, int(next_post_at - current_time))
+                time_left_mins = int(remaining_secs / 60)
 
-        await event.respond(text)
+                entry = (
+                    f"• **{title}** (`{cid}`)\n"
+                    f"  ├ 📎 Policy: {link_badge}\n"
+                    f"  ├ ⏱️ Cooldown: {cooldown_badge}\n"
+                    f"  └ ⏳ Next Post: in ~{time_left_mins} mins ({remaining_secs}s)\n\n"
+                )
+
+                if len(chunk) + len(entry) > 3500:
+                    await event.respond(chunk)
+                    chunk = ""
+                chunk += entry
+
+            if chunk.strip():
+                await event.respond(chunk)
+
+        except Exception as e:
+            logger.error(f"Error in all_groups_cmd: {e}")
+            await event.respond(f"❌ **Failed to retrieve groups:** `{e}`")
