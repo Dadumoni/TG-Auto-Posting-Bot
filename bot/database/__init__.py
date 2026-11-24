@@ -26,6 +26,10 @@ from .mongo import (
     clear_custom_texts_db,
     get_random_custom_text,
     update_group_text_policy,
+    set_flood_safety_lock,
+    get_flood_safety_lock,
+    clear_flood_safety_lock,
+    is_flood_locked,
 )
 
 __all__ = [
@@ -55,4 +59,8 @@ __all__ = [
     "add_custom_texts_db",
     "clear_custom_texts_db",
     "get_random_custom_text",
+    "set_flood_safety_lock",
+    "get_flood_safety_lock",
+    "clear_flood_safety_lock",
+    "is_flood_locked",
 ]

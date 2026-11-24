@@ -62,6 +62,67 @@ def set_bot_posting_status(active: bool) -> bool:
         return False
 
 
+def set_flood_safety_lock(cooloff_until: float, alert_msg_id: int = 0) -> bool:
+    """Set emergency 6-hour safety lock state in MongoDB."""
+    if config_collection is None:
+        return False
+    try:
+        config_collection.update_one(
+            {"type": "flood_safety_lock"},
+            {
+                "$set": {
+                    "active": True,
+                    "cooloff_until": cooloff_until,
+                    "alert_msg_id": alert_msg_id,
+                    "locked_at": time.time(),
+                }
+            },
+            upsert=True,
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error setting flood safety lock in DB: {e}")
+        return False
+
+
+def get_flood_safety_lock() -> Optional[Dict[str, Any]]:
+    """Retrieve flood safety lock details from MongoDB."""
+    if config_collection is None:
+        return None
+    try:
+        doc = config_collection.find_one({"type": "flood_safety_lock"})
+        if doc and doc.get("active"):
+            return doc
+    except Exception as e:
+        logger.error(f"Error reading flood safety lock from DB: {e}")
+    return None
+
+
+def clear_flood_safety_lock() -> bool:
+    """Clear emergency flood safety lock from MongoDB."""
+    if config_collection is None:
+        return False
+    try:
+        config_collection.update_one(
+            {"type": "flood_safety_lock"},
+            {"$set": {"active": False, "cooloff_until": 0, "updated_at": time.time()}},
+            upsert=True,
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error clearing flood safety lock in DB: {e}")
+        return False
+
+
+def is_flood_locked() -> bool:
+    """Check if emergency flood safety lock is currently active."""
+    lock = get_flood_safety_lock()
+    if not lock:
+        return False
+    cooloff_until = lock.get("cooloff_until", 0)
+    return time.time() < cooloff_until
+
+
 # Selected emoji pool for randomized human-like post variation per group
 EMOJI_POOL = [
     "👇", "😍", "🥵", "✅", "👁", "😱", "😈", "☠️",
