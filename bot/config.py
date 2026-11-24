@@ -46,10 +46,27 @@ try:
 except ValueError:
     PORT = 8080
 
-APP_URL = os.getenv("APP_URL", f"http://0.0.0.0:{PORT}/health")
+raw_app_url = os.getenv("APP_URL", "").strip()
+if raw_app_url:
+    if not raw_app_url.startswith("http://") and not raw_app_url.startswith("https://"):
+        raw_app_url = f"https://{raw_app_url}"
+    APP_URL = raw_app_url.rstrip("/")
+else:
+    APP_URL = f"http://0.0.0.0:{PORT}"
 
 # Timing Configurations (in seconds)
+# Default auto-ping interval: 10 minutes (600 seconds) to prevent Koyeb sleep
+PING_INTERVAL_SECONDS = int(os.getenv("PING_INTERVAL_SECONDS", "600"))
+
+# Base post interval with human-like randomized range
 POST_INTERVAL_SECONDS = int(os.getenv("POST_INTERVAL_SECONDS", "3600"))
+POST_INTERVAL_MIN = int(os.getenv("POST_INTERVAL_MIN", str(int(POST_INTERVAL_SECONDS * 0.85))))
+POST_INTERVAL_MAX = int(os.getenv("POST_INTERVAL_MAX", str(int(POST_INTERVAL_SECONDS * 1.15))))
+
+# Guard against misconfigured min > max
+if POST_INTERVAL_MIN > POST_INTERVAL_MAX:
+    POST_INTERVAL_MIN, POST_INTERVAL_MAX = POST_INTERVAL_MAX, POST_INTERVAL_MIN
+
 POST_DELAY_SECONDS = int(os.getenv("POST_DELAY_SECONDS", "3"))
-PING_INTERVAL_SECONDS = int(os.getenv("PING_INTERVAL_SECONDS", "300"))
 SCHEDULER_CHECK_INTERVAL = int(os.getenv("SCHEDULER_CHECK_INTERVAL", "30"))
+COOLDOWN_BUFFER_SECONDS = int(os.getenv("COOLDOWN_BUFFER_SECONDS", "120"))

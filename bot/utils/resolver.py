@@ -1,5 +1,7 @@
 from typing import Union, Any
 from telethon import utils
+from telethon.tl.functions.channels import GetFullChannelRequest
+from telethon.tl.types import Channel
 from bot.client import user
 from bot.config import logger
 
@@ -30,3 +32,19 @@ async def resolve_chat_entity(chat_identifier: Union[int, str]) -> Any:
             f"Target '{chat_identifier}' could not be resolved in the Userbot dialogs. "
             "Please ensure the Userbot account has joined the target chat."
         )
+
+
+async def detect_group_cooldown(chat_entity) -> int:
+    """
+    Detect the native Telegram slowmode cooldown timer (in seconds) set on a group/channel.
+    Returns 0 if no slowmode cooldown is active.
+    """
+    try:
+        if isinstance(chat_entity, Channel):
+            full_channel = await user(GetFullChannelRequest(chat_entity))
+            slowmode = getattr(full_channel.full_chat, 'slowmode_seconds', None)
+            if slowmode:
+                return int(slowmode)
+    except Exception as e:
+        logger.debug(f"Could not retrieve full channel slowmode metadata: {e}")
+    return 0
