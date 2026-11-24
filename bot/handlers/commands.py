@@ -31,7 +31,12 @@ from bot.utils import parse_chat_target, resolve_chat_entity, detect_group_coold
 pending_link_config = {}
 
 
-def register_command_handlers():
+def is_user_waiting_input(user_id: int) -> bool:
+    """Check if the user has an active interactive prompt pending in /set_message."""
+    return user_id in pending_link_config
+
+
+def register_command_handlers(bot_instance=None):
     """Register core utility and configuration bot commands."""
 
     @bot.on(events.NewMessage(pattern=r'(?i)^/start(?:@\w+)?(?:\s|$)'))
@@ -502,3 +507,7 @@ def register_command_handlers():
         except Exception as e:
             logger.error(f"Error in get_message_cmd: {e}")
             await event.respond(f"❌ Failed to retrieve message settings: `{e}`")
+
+
+# Alias for backwards compatibility
+register_base_commands = register_command_handlers
