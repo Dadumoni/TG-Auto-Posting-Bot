@@ -56,7 +56,9 @@ Add the following Environment Variables in the Koyeb service settings:
 
 | Command | Description |
 | :--- | :--- |
-| `/start` | View bot overview, group counts, and help menu |
+| `/start` | View bot overview, active status, group counts, and help menu |
+| `/stop` | Pause all auto-posting across all groups |
+| `/restart` | Resume scheduled auto-posting across all groups |
 | `/debug <target>` | Check Userbot access and detect group slowmode cooldown |
 | `/set_message <text>` | Set default promotional post message |
 | `/set_tme_message <text>` | Set post message for groups supporting only t.me links |

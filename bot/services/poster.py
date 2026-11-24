@@ -12,6 +12,7 @@ from bot.config import (
     COOLDOWN_BUFFER_SECONDS,
 )
 from bot.database import (
+    is_posting_active,
     get_custom_message,
     get_group_db,
     update_group_schedule,
@@ -58,6 +59,10 @@ async def post_to_single_group(
     and slowmode cooldown handling.
     """
     async with posting_lock:
+        if not is_posting_active():
+            logger.info(f"Skipping post to '{group_title}' ({chat_id}): Auto-posting is stopped via /stop.")
+            return False
+
         logger.info(f"Attempting post to group: '{group_title}' (ID: {chat_id})...")
 
         if group_data is None:

@@ -1,5 +1,8 @@
 from telethon import events, utils
+from bot.config import ADMIN_ID
 from bot.database import (
+    is_posting_active,
+    set_bot_posting_status,
     get_all_groups_db,
     get_all_custom_messages,
     set_custom_message,
@@ -15,9 +18,14 @@ def register_base_commands(bot):
         if not event.is_private:
             return
         groups_count = len(get_all_groups_db())
+        status_icon = "🟢 Active (Running)" if is_posting_active() else "🔴 Stopped (Paused)"
         await event.respond(
-            f"👋 **Welcome to Group Manager & Auto-Scheduler Bot!**\n"
+            f"👋 **Welcome to Group Manager & Auto-Scheduler Bot!**\n\n"
+            f"⚡ **Bot Status:** {status_icon}\n"
             f"📊 **Total Active Groups:** `{groups_count}`\n\n"
+            "**Control Commands:**\n"
+            "• `/stop` - Stop all auto-posting across all groups\n"
+            "• `/restart` - Resume/restart scheduled auto-posting\n\n"
             "**Ways to Add Groups:**\n"
             "1. Send a public or private Telegram link / @username.\n"
             "2. Forward any message directly from the target group.\n"
@@ -33,6 +41,40 @@ def register_base_commands(bot):
             "• `/remove_all` - Clear all groups from database\n"
             "• `/all_groups` - List scheduled groups, link types, and countdowns\n"
             "• `/debug <target>` - Check Userbot access & slowmode cooldown"
+        )
+
+    @bot.on(events.NewMessage(pattern=r'^/stop$'))
+    async def stop_cmd(event):
+        if not event.is_private:
+            return
+        if ADMIN_ID != 0 and event.sender_id != ADMIN_ID:
+            await event.respond("⚠️ Unauthorized. Only the bot admin can stop auto-posting.")
+            return
+
+        set_bot_posting_status(False)
+        await event.respond(
+            "🛑 **Auto-Posting Paused!**\n\n"
+            "The bot has been stopped and will **not** post to any group.\n"
+            "• All automatic scheduler cycles are paused.\n"
+            "• Any newly added groups will be registered but won't receive posts until resumed.\n\n"
+            "💡 _Use `/restart` or `/resume` to resume auto-posting at any time._"
+        )
+
+    @bot.on(events.NewMessage(pattern=r'^/(?:restart|resume)$'))
+    async def restart_cmd(event):
+        if not event.is_private:
+            return
+        if ADMIN_ID != 0 and event.sender_id != ADMIN_ID:
+            await event.respond("⚠️ Unauthorized. Only the bot admin can restart auto-posting.")
+            return
+
+        set_bot_posting_status(True)
+        await event.respond(
+            "▶️ **Auto-Posting Resumed & Restarted!**\n\n"
+            "The bot is now fully active.\n"
+            "• Scheduled posts will continue according to their randomized intervals.\n"
+            "• Cooldowns and link type policies remain fully enforced.\n\n"
+            "💡 _Use `/stop` to pause posting whenever needed._"
         )
 
     @bot.on(events.NewMessage(pattern=r'^/debug'))
@@ -81,7 +123,7 @@ def register_base_commands(bot):
         else:
             await event.respond("❌ Failed to save message. Database connection error.")
 
-    @bot.on(events.NewMessage(pattern=r'^/(?:set_tme_message|set_message_tme)(?:\s|$)'))
+    @bot.on(events.NewMessage(pattern=r'^/(?:set_tme_message|set_message_tme)(?:\\s|$)'))
     async def set_tme_message_cmd(event):
         if not event.is_private:
             return
@@ -95,7 +137,7 @@ def register_base_commands(bot):
         else:
             await event.respond("❌ Failed to save message. Database connection error.")
 
-    @bot.on(events.NewMessage(pattern=r'^/(?:set_domain_message|set_message_domain)(?:\s|$)'))
+    @bot.on(events.NewMessage(pattern=r'^/(?:set_domain_message|set_message_domain)(?:\\s|$)'))
     async def set_domain_message_cmd(event):
         if not event.is_private:
             return

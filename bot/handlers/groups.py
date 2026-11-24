@@ -2,6 +2,7 @@ import time
 from telethon import events, utils, Button
 from bot.config import logger, ADMIN_ID
 from bot.database import (
+    is_posting_active,
     is_group_exists,
     add_group_db,
     update_group_link_type,
@@ -46,17 +47,25 @@ async def process_add_group(event, raw_target, source_desc=""):
         )
 
         cooldown_display = f"`{cooldown_seconds}s`" if cooldown_seconds > 0 else "`None`"
+        is_active = is_posting_active()
+        status_note = (
+            "🔄 Dispatching immediate initial post to queue..."
+            if is_active
+            else "⏸️ Auto-posting is currently paused (/stop). Initial post will be queued until resumed (/restart)."
+        )
+
         await status_msg.edit(
             f"✅ **Group Added Successfully!** {source_desc}\n\n"
             f"📌 **Title:** {group_title}\n"
             f"🆔 **ID:** `{chat_id}`\n"
             f"⏱️ **Cooldown Timer:** {cooldown_display}\n"
             f"📎 **Initial Link Policy:** `t.me only`\n\n"
-            "🔄 Dispatching immediate initial post to queue..."
+            f"{status_note}"
         )
 
-        # Trigger immediate first post to this newly added group
-        await post_to_single_group(chat_id, group_title)
+        # Trigger immediate first post to this newly added group if posting is active
+        if is_active:
+            await post_to_single_group(chat_id, group_title)
 
         # Prompt Admin via interactive inline buttons to choose supported link type
         if ADMIN_ID != 0:
@@ -169,7 +178,8 @@ def register_group_handlers(bot):
             await event.respond("📊 **Total Groups:** `0`\n📂 No groups are currently saved in the database.")
             return
 
-        text = f"📊 **Total Scheduled Groups:** `{total_count}`\n\n"
+        status_header = "🟢 Status: Active (Posting Enabled)" if is_posting_active() else "🔴 Status: Paused via /stop"
+        text = f"📊 **Total Scheduled Groups:** `{total_count}` | {status_header}\n\n"
         current_time = time.time()
         for group in groups:
             title = group.get("title", "Unknown")

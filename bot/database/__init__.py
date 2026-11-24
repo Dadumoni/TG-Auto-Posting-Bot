@@ -1,5 +1,7 @@
 """Database package for MongoDB operations."""
 from .mongo import (
+    is_posting_active,
+    set_bot_posting_status,
     get_custom_message,
     set_custom_message,
     get_all_custom_messages,
@@ -16,6 +18,8 @@ from .mongo import (
 )
 
 __all__ = [
+    "is_posting_active",
+    "set_bot_posting_status",
     "get_custom_message",
     "set_custom_message",
     "get_all_custom_messages",

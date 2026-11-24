@@ -22,6 +22,45 @@ except Exception as e:
     logger.error(f"Failed to connect to MongoDB: {e}")
 
 
+def is_posting_active() -> bool:
+    """
+    Check whether global auto-posting is active or paused via /stop.
+    Returns True by default if not set.
+    """
+    if config_collection is None:
+        return True
+    try:
+        doc = config_collection.find_one({"type": "bot_status"})
+        if doc and "active" in doc:
+            return bool(doc["active"])
+    except Exception as e:
+        logger.error(f"Error checking bot posting status: {e}")
+    return True
+
+
+def set_bot_posting_status(active: bool) -> bool:
+    """Save global auto-posting state (True for running, False for stopped)."""
+    if config_collection is None:
+        logger.error("Cannot set posting status: MongoDB is not connected.")
+        return False
+    try:
+        config_collection.update_one(
+            {"type": "bot_status"},
+            {
+                "$set": {
+                    "active": active,
+                    "status": "running" if active else "stopped",
+                    "updated_at": time.time(),
+                }
+            },
+            upsert=True,
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error updating bot posting status: {e}")
+        return False
+
+
 def _resolve_config_type(msg_type: str) -> str:
     """Normalize message type key for MongoDB config collection."""
     clean_type = (msg_type or "").lower().strip()
