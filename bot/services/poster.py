@@ -17,6 +17,7 @@ from bot.database import (
     get_group_db,
     update_group_schedule,
     update_group_cooldown,
+    generate_group_post,
 )
 from bot.utils import resolve_chat_entity, notify_admin
 
@@ -69,17 +70,19 @@ async def post_to_single_group(
             group_data = get_group_db(chat_id) or {}
 
         link_type = group_data.get("link_type", "t_me")
+        allow_text = group_data.get("allow_text", True)
         success = False
         post_timestamp = time.time()
         next_post_at = calculate_next_post_timestamp(group_data)
 
         try:
             chat = await resolve_chat_entity(chat_id)
-            post_text = get_custom_message(link_type)
+            post_text = generate_group_post(link_type=link_type, allow_text=allow_text)
             sent_message = await user.send_message(chat, post_text)
 
             success = True
             link_badge = "🔗 t.me only" if link_type == "t_me" else "🌐 Domain / External"
+            mode_badge = "✅ Text + Emojis" if allow_text else "🚫 Link Only"
             cooldown_val = group_data.get("cooldown_seconds", 0)
             cooldown_info = f"`{cooldown_val}s`" if cooldown_val > 0 else "None"
 
@@ -88,6 +91,7 @@ async def post_to_single_group(
                 f"📌 **Group:** {group_title}\n"
                 f"🆔 **ID:** `{chat_id}`\n"
                 f"📎 **Link Type:** {link_badge}\n"
+                f"📝 **Post Mode:** {mode_badge}\n"
                 f"⏱️ **Cooldown:** {cooldown_info}\n"
                 f"📨 **Message ID:** `{sent_message.id}`"
             )

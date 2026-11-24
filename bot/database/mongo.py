@@ -171,16 +171,82 @@ def set_base_text_db(text: str) -> bool:
         return False
 
 
-def generate_group_post(link_type: str = "t_me") -> str:
+def get_custom_texts_db() -> List[str]:
+    """Retrieve list of all active custom promotional texts."""
+    if config_collection is None:
+        return []
+    try:
+        doc = config_collection.find_one({"type": "custom_texts_pool"})
+        if doc and isinstance(doc.get("texts"), list) and doc["texts"]:
+            return [t.strip() for t in doc["texts"] if t.strip()]
+    except Exception as e:
+        logger.error(f"Error fetching custom texts pool: {e}")
+    # Fallback to single base_text if pool is empty
+    base = get_base_text_db()
+    return [base] if base else []
+
+
+def add_custom_texts_db(new_texts: List[str]) -> List[str]:
+    """Add single or multiple texts to the custom texts pool without duplicates."""
+    if config_collection is None:
+        logger.error("Cannot add custom texts: MongoDB is not connected.")
+        return []
+    current = get_custom_texts_db()
+    for t in new_texts:
+        clean = t.strip()
+        if clean and clean not in current:
+            current.append(clean)
+    try:
+        config_collection.update_one(
+            {"type": "custom_texts_pool"},
+            {"$set": {"texts": current, "updated_at": time.time()}},
+            upsert=True,
+        )
+        # Also keep base_text updated to the latest text
+        if current:
+            set_base_text_db(current[-1])
+    except Exception as e:
+        logger.error(f"Error saving custom texts pool: {e}")
+    return current
+
+
+def clear_custom_texts_db() -> bool:
+    """Clear all custom texts from the pool."""
+    if config_collection is None:
+        return False
+    try:
+        config_collection.update_one(
+            {"type": "custom_texts_pool"},
+            {"$set": {"texts": [], "updated_at": time.time()}},
+            upsert=True,
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error clearing custom texts pool: {e}")
+        return False
+
+
+def get_random_custom_text() -> str:
+    """Pick a random text from custom texts pool."""
+    texts = get_custom_texts_db()
+    if texts:
+        return random.choice(texts)
+    return get_base_text_db()
+
+
+def generate_group_post(link_type: str = "t_me", allow_text: bool = True) -> str:
     """
     Generate dynamic post content for a group:
-    {custom text} (random emoji from selected pool)
-    \n\n
-    {link}
-    {link}
+    If allow_text is False:
+        Returns single link only: {link}
+    If allow_text is True:
+        Returns:
+        {custom text} (random emoji from selected pool)
+        \n\n
+        {link}
+        {link}
     """
     clean_type = "domain" if (link_type or "").lower() in ["domain", "ext", "external"] else "t_me"
-    custom_text = get_base_text_db()
     link = get_link_db(clean_type)
 
     if not link:
@@ -191,6 +257,12 @@ def generate_group_post(link_type: str = "t_me") -> str:
     if not link:
         link = "https://t.me"
 
+    # In Link-Only groups: return only single clean link (no text, no emojis)
+    if not allow_text:
+        return link
+
+    # Text + Emojis mode
+    custom_text = get_random_custom_text()
     random_emoji = random.choice(EMOJI_POOL)
     if custom_text:
         header = f"{custom_text} {random_emoji}"
@@ -201,9 +273,9 @@ def generate_group_post(link_type: str = "t_me") -> str:
     return f"{header}\n\n{link}\n{link}"
 
 
-def get_custom_message(msg_type: str = "default") -> str:
-    """Retrieve dynamic generated post message for the specified link type."""
-    return generate_group_post(msg_type)
+def get_custom_message(msg_type: str = "default", allow_text: bool = True) -> str:
+    """Retrieve dynamic generated post message for the specified link type and text policy."""
+    return generate_group_post(msg_type, allow_text=allow_text)
 
 
 def set_custom_message(text: str, msg_type: str = "default") -> bool:
@@ -261,9 +333,10 @@ def add_group_db(
     title: str,
     cooldown_seconds: int = 0,
     link_type: str = "t_me",
+    allow_text: bool = True,
     next_post_at: Optional[float] = None,
 ) -> bool:
-    """Add or update a group record with cooldown, link type, and scheduling metadata."""
+    """Add or update a group record with cooldown, link type, text policy, and scheduling metadata."""
     if groups_collection is None:
         logger.error("Cannot add group: MongoDB is not connected.")
         return False
@@ -274,6 +347,7 @@ def add_group_db(
         "last_posted": now,
         "cooldown_seconds": cooldown_seconds,
         "link_type": link_type,
+        "allow_text": bool(allow_text),
         "next_post_at": next_post_at if next_post_at is not None else now,
     }
     try:
@@ -301,6 +375,21 @@ def update_group_link_type(chat_id: int, link_type: str) -> bool:
         return True
     except Exception as e:
         logger.error(f"Error updating link_type for group {chat_id}: {e}")
+        return False
+
+
+def update_group_text_policy(chat_id: int, allow_text: bool) -> bool:
+    """Update whether a group allows custom text & emojis or link only."""
+    if groups_collection is None:
+        return False
+    try:
+        groups_collection.update_one(
+            {"chat_id": chat_id},
+            {"$set": {"allow_text": bool(allow_text)}},
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error updating text policy for group {chat_id}: {e}")
         return False
 
 

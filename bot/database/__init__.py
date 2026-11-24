@@ -21,6 +21,11 @@ from .mongo import (
     get_base_text_db,
     set_base_text_db,
     generate_group_post,
+    get_custom_texts_db,
+    add_custom_texts_db,
+    clear_custom_texts_db,
+    get_random_custom_text,
+    update_group_text_policy,
 )
 
 __all__ = [
@@ -33,6 +38,7 @@ __all__ = [
     "get_group_db",
     "add_group_db",
     "update_group_link_type",
+    "update_group_text_policy",
     "update_group_cooldown",
     "update_group_schedule",
     "remove_group_db",
@@ -45,4 +51,8 @@ __all__ = [
     "get_base_text_db",
     "set_base_text_db",
     "generate_group_post",
+    "get_custom_texts_db",
+    "add_custom_texts_db",
+    "clear_custom_texts_db",
+    "get_random_custom_text",
 ]
