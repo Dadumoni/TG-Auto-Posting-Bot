@@ -4,8 +4,10 @@ from bot.config import logger, ADMIN_ID
 from bot.database import (
     is_posting_active,
     is_group_exists,
+    get_group_db,
     add_group_db,
     update_group_link_type,
+    update_group_text_policy,
     remove_group_db,
     remove_all_groups_db,
     get_all_groups_db,
@@ -53,6 +55,7 @@ async def process_add_group(event, raw_target, source_desc=""):
             title=group_title,
             cooldown_seconds=cooldown_seconds,
             link_type="t_me",
+            allow_text=True,
             next_post_at=initial_next_post,
         )
 
@@ -112,7 +115,7 @@ def register_group_handlers(bot):
 
     @bot.on(events.CallbackQuery(pattern=r'^linktype:(-?\d+):(\w+)'))
     async def link_type_callback(event):
-        """Handle inline button selection for group supported link type."""
+        """Handle inline button selection for group supported link type (Step 1)."""
         try:
             if ADMIN_ID != 0 and event.sender_id != ADMIN_ID:
                 await event.answer("⚠️ Unauthorized. Only the bot admin can configure link types.", alert=True)
@@ -123,14 +126,51 @@ def register_group_handlers(bot):
 
             update_group_link_type(chat_id, chosen_type)
             type_label = "🔗 t.me only" if chosen_type == "t_me" else "🌐 Domain / External"
-            await event.answer(f"✅ Policy Saved: {type_label}")
+            await event.answer(f"✅ Link: {type_label}")
 
-            # Delete the prompt message once configured
-            await event.delete()
+            # Prompt Step 2: Does this group allow Custom Text & Emojis?
+            group_data = get_group_db(chat_id) or {}
+            group_title = escape_md(group_data.get("title", "Target Group"))
+            step2_prompt = (
+                f"⚙️ **Group Policy Configuration (Step 2 of 2):**\n\n"
+                f"• **Group:** {group_title}\n"
+                f"• **Chat ID:** `{chat_id}`\n"
+                f"• **Link Type:** {type_label}\n\n"
+                "📝 **Does this group allow Custom Text & Emojis?**\n"
+                "_Choose 'No (Link Only)' if this group bans promotional text or emojis, so the bot only sends a single clean link._"
+            )
+            step2_buttons = [
+                [
+                    Button.inline("✅ Yes (Text + Emoji)", data=f"textpolicy:{chat_id}:yes"),
+                    Button.inline("🚫 No (Link Only)", data=f"textpolicy:{chat_id}:no"),
+                ]
+            ]
+            await event.edit(step2_prompt, buttons=step2_buttons)
         except Exception as e:
             logger.error(f"Error in link_type_callback: {e}")
 
-    @bot.on(events.NewMessage(pattern=r'(?i)^/add_group(?:@\w+)?(?:\s|$)'))
+    @bot.on(events.CallbackQuery(pattern=r'^textpolicy:(-?\d+):(yes|no)'))
+    async def text_policy_callback(event):
+        """Handle inline button selection for group custom text & emoji support (Step 2)."""
+        try:
+            if ADMIN_ID != 0 and event.sender_id != ADMIN_ID:
+                await event.answer("⚠️ Unauthorized. Only the bot admin can configure group policies.", alert=True)
+                return
+
+            chat_id = int(event.pattern_match.group(1))
+            choice = event.pattern_match.group(2)
+            allow_text = (choice == "yes")
+
+            update_group_text_policy(chat_id, allow_text)
+            mode_label = "✅ Text & Emojis Allowed" if allow_text else "🚫 Link Only Mode"
+            await event.answer(f"✅ Group Configured: {mode_label}")
+
+            # Delete the prompt message once fully configured
+            await event.delete()
+        except Exception as e:
+            logger.error(f"Error in text_policy_callback: {e}")
+
+    @bot.on(events.NewMessage(pattern=r'(?i)^/add_group(?:@\\w+)?(?:\\s|$)'))
     async def add_group_cmd(event):
         if not event.is_private:
             return
@@ -144,7 +184,7 @@ def register_group_handlers(bot):
         raw_target = parse_chat_target(parts[1])
         await process_add_group(event, raw_target, source_desc="(/add_group command)")
 
-    @bot.on(events.NewMessage(pattern=r'(?i)^/remove_group(?:@\w+)?(?:\s|$)'))
+    @bot.on(events.NewMessage(pattern=r'(?i)^/remove_group(?:@\\w+)?(?:\\s|$)'))
     async def remove_group_cmd(event):
         if not event.is_private:
             return
@@ -165,7 +205,7 @@ def register_group_handlers(bot):
             logger.error(f"Error in remove_group_cmd: {e}")
             await event.respond(f"❌ Error removing group: `{e}`")
 
-    @bot.on(events.NewMessage(pattern=r'(?i)^/(?:remove_all|removeall)(?:@\w+)?(?:\s|$)'))
+    @bot.on(events.NewMessage(pattern=r'(?i)^/(?:remove_all|removeall)(?:@\\w+)?(?:\\s|$)'))
     async def remove_all_groups_cmd(event):
         if not event.is_private:
             return
@@ -177,7 +217,7 @@ def register_group_handlers(bot):
             logger.error(f"Error in remove_all_groups_cmd: {e}")
             await event.respond(f"❌ Error clearing groups: `{e}`")
 
-    @bot.on(events.NewMessage(pattern=r'(?i)^(?:/all_groups|/allgroups|all\s*groups)(?:@\w+)?(?:\s|$)'))
+    @bot.on(events.NewMessage(pattern=r'(?i)^(?:/all_groups|/allgroups|all\\s*groups)(?:@\\w+)?(?:\\s|$)'))
     async def all_groups_cmd(event):
         if not event.is_private:
             return
@@ -206,9 +246,12 @@ def register_group_handlers(bot):
                 remaining_secs = max(0, int(next_post_at - current_time))
                 time_left_mins = int(remaining_secs / 60)
 
+                allow_text = group.get("allow_text", True)
+                text_badge = "✅ Text+Emoji" if allow_text else "🚫 Link Only"
+
                 entry = (
                     f"• **{title}** (`{cid}`)\n"
-                    f"  ├ 📎 Policy: {link_badge}\n"
+                    f"  ├ 📎 Policy: {link_badge} | {text_badge}\n"
                     f"  ├ ⏱️ Cooldown: {cooldown_badge}\n"
                     f"  └ ⏳ Next Post: in ~{time_left_mins} mins ({remaining_secs}s)\n\n"
                 )

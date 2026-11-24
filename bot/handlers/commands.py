@@ -13,6 +13,9 @@ from bot.database import (
     get_base_text_db,
     set_base_text_db,
     generate_group_post,
+    get_custom_texts_db,
+    add_custom_texts_db,
+    clear_custom_texts_db,
 )
 from bot.utils import parse_chat_target, resolve_chat_entity, detect_group_cooldown
 
@@ -39,11 +42,12 @@ def register_base_commands(bot):
                 f"👋 **Group Auto-Poster Bot**\n\n"
                 f"⚡ **Status:** {status_icon} | 📊 **Groups:** `{groups_count}`\n\n"
                 "📋 **Commands:**\n"
-                "• `/all_groups` - View scheduled groups & countdowns\n"
-                "• `/add_group <target>` - Add group (or forward message/link)\n"
+                "• `/all_groups` - View scheduled groups & policies\n"
+                "• `/add_group <target>` - Add group (detects cooldown & link policy)\n"
                 "• `/remove_group <id>` - Remove a group\n"
+                "• `/add_text <texts>` - Add custom texts {text1, text2}\n"
                 "• `/set_message` - Configure links & post text\n"
-                "• `/get_message` - View configured links & post preview\n"
+                "• `/get_message` - View configured links & previews\n"
                 "• `/stop` / `/restart` - Pause / resume auto-posting\n"
                 "• `/debug <target>` - Test group access & slowmode"
             )
@@ -290,6 +294,63 @@ def register_base_commands(bot):
         set_link_db("domain", link)
         await event.respond(f"✅ **Domain / External Link Saved!**\n\n`{link}`")
 
+    @bot.on(events.NewMessage(pattern=r'(?i)^/add_text(?:@\w+)?(?:\s|$)'))
+    async def add_text_cmd(event):
+        """Add single or multiple custom promotional texts to rotation pool."""
+        if not event.is_private:
+            return
+        if ADMIN_ID != 0 and event.sender_id != ADMIN_ID:
+            await event.respond("⚠️ Unauthorized. Only the bot admin can add custom texts.")
+            return
+
+        parts = (event.text or "").split(maxsplit=1)
+        if len(parts) < 2:
+            existing = get_custom_texts_db()
+            existing_str = "\n".join(f"{i+1}. `{t}`" for i, t in enumerate(existing)) if existing else "_(No custom texts added yet)_"
+            await event.respond(
+                "❌ **Usage:** `/add_text {text1, text2, text3}` or `/add_text {single text}`\n\n"
+                "**Examples:**\n"
+                "• `/add_text {Join our VIP channel, Best discounts daily, Check this out}`\n"
+                "• `/add_text {Special offer today!}`\n"
+                "• `/add_text Direct text without brackets`\n\n"
+                f"📋 **Current Active Texts Pool ({len(existing)}):**\n{existing_str}"
+            )
+            return
+
+        raw = parts[1].strip()
+        # Remove surrounding curly braces if present
+        if raw.startswith('{') and raw.endswith('}'):
+            raw = raw[1:-1].strip()
+
+        # Split by comma
+        new_items = [t.strip() for t in raw.split(',') if t.strip()]
+        if not new_items:
+            await event.respond("❌ Please provide at least one valid text.")
+            return
+
+        updated_list = add_custom_texts_db(new_items)
+        added_str = "\n".join(f"• `{t}`" for t in new_items)
+        total_str = "\n".join(f"{i+1}. `{t}`" for i, t in enumerate(updated_list))
+
+        await event.respond(
+            f"✅ **Custom Text(s) Saved to Rotation Pool!**\n\n"
+            f"➕ **Newly Added ({len(new_items)}):**\n{added_str}\n\n"
+            f"📋 **Total Texts in Pool ({len(updated_list)}):**\n{total_str}\n\n"
+            "🎲 _The bot will randomly pick one of these texts + emoji for each group post._"
+        )
+
+    @bot.on(events.NewMessage(pattern=r'(?i)^/(?:clear_texts|clear_text)(?:@\w+)?(?:\s|$)'))
+    async def clear_texts_cmd(event):
+        """Clear custom texts rotation pool."""
+        if not event.is_private:
+            return
+        if ADMIN_ID != 0 and event.sender_id != ADMIN_ID:
+            await event.respond("⚠️ Unauthorized. Only the bot admin can clear texts.")
+            return
+
+        clear_custom_texts_db()
+        await event.respond("🗑️ **Custom texts pool cleared.** Bot will use fallback header or links.")
+
     @bot.on(events.NewMessage(pattern=r'(?i)^/get_message(?:@\w+)?(?:\s|$)'))
     async def get_message_cmd(event):
         if not event.is_private:
@@ -297,23 +358,30 @@ def register_base_commands(bot):
         try:
             tme_link = get_link_db("t_me") or "_(Not set)_"
             domain_link = get_link_db("domain") or "_(Not set)_"
-            base_text = get_base_text_db() or "_(Not set)_"
+            custom_texts = get_custom_texts_db()
 
-            sample_tme = generate_group_post("t_me")
-            sample_domain = generate_group_post("domain")
+            if custom_texts:
+                texts_display = "\n".join(f"{i+1}. `{t}`" for i, t in enumerate(custom_texts))
+            else:
+                base_fallback = get_base_text_db()
+                texts_display = f"1. `{base_fallback}`" if base_fallback else "_(Not set - uses emoji only)_"
+
+            preview_text_domain = generate_group_post("domain", allow_text=True)
+            preview_linkonly_domain = generate_group_post("domain", allow_text=False)
 
             reply = (
                 "📋 **Configured Post Message & Links:**\n\n"
-                f"📝 **Custom Text:**\n`{base_text}`\n\n"
+                f"📝 **Custom Texts Pool ({len(custom_texts)}):**\n"
+                f"{texts_display}\n\n"
                 f"🔗 **t.me Link:**\n{tme_link}\n\n"
                 f"🌐 **External / Domain Link:**\n{domain_link}\n\n"
                 "────────────────────────\n"
-                "👁️ **Preview (t.me Groups):**\n\n"
-                f"{sample_tme}\n\n"
+                "👁️ **Preview: Text + Emoji Allowed Group:**\n\n"
+                f"{preview_text_domain}\n\n"
                 "────────────────────────\n"
-                "👁️ **Preview (Domain Groups):**\n\n"
-                f"{sample_domain}\n\n"
-                "💡 _Use `/set_message` to change links or text anytime._"
+                "👁️ **Preview: Link-Only Group (No Text/Emoji):**\n\n"
+                f"{preview_linkonly_domain}\n\n"
+                "💡 _Use `/add_text` to add more texts, `/set_message` to change links._"
             )
             await event.respond(reply)
         except Exception as e:
