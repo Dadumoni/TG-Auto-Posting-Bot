@@ -1,20 +1,22 @@
 import time
-from telethon import events, utils
-from bot.config import logger
+from telethon import events, utils, Button
+from bot.config import logger, ADMIN_ID
 from bot.database import (
     is_group_exists,
     add_group_db,
+    update_group_link_type,
     remove_group_db,
     remove_all_groups_db,
     get_all_groups_db,
 )
-from bot.services import post_to_single_group
-from bot.utils import parse_chat_target, resolve_chat_entity
+from bot.services import post_to_single_group, calculate_next_post_timestamp
+from bot.utils import parse_chat_target, resolve_chat_entity, detect_group_cooldown
 
 
 async def process_add_group(event, raw_target, source_desc=""):
     """
-    Resolve and save a target chat into the database, then trigger an immediate first post.
+    Resolve and save a target chat into the database, detect slowmode cooldown,
+    send an immediate first post, and prompt the admin via inline buttons for supported link type.
     """
     status_msg = await event.respond("🔍 Detecting target and verifying userbot access...")
     try:
@@ -30,14 +32,54 @@ async def process_add_group(event, raw_target, source_desc=""):
             )
             return
 
-        add_group_db(chat_id, group_title)
+        # Detect native Telegram slowmode/cooldown timer
+        cooldown_seconds = await detect_group_cooldown(chat)
+        initial_next_post = calculate_next_post_timestamp({"cooldown_seconds": cooldown_seconds})
+
+        # Save with default link_type="t_me"
+        add_group_db(
+            chat_id=chat_id,
+            title=group_title,
+            cooldown_seconds=cooldown_seconds,
+            link_type="t_me",
+            next_post_at=initial_next_post,
+        )
+
+        cooldown_display = f"`{cooldown_seconds}s`" if cooldown_seconds > 0 else "`None`"
         await status_msg.edit(
-            f"✅ **Group Added Successfully!** {source_desc}\n"
+            f"✅ **Group Added Successfully!** {source_desc}\n\n"
             f"📌 **Title:** {group_title}\n"
-            f"🆔 **ID:** `{chat_id}`\n\n"
+            f"🆔 **ID:** `{chat_id}`\n"
+            f"⏱️ **Cooldown Timer:** {cooldown_display}\n"
+            f"📎 **Initial Link Policy:** `t.me only`\n\n"
             "🔄 Dispatching immediate initial post to queue..."
         )
+
+        # Trigger immediate first post to this newly added group
         await post_to_single_group(chat_id, group_title)
+
+        # Prompt Admin via interactive inline buttons to choose supported link type
+        if ADMIN_ID != 0:
+            prompt_text = (
+                f"📌 **New Group Registered:**\n\n"
+                f"• **Title:** {group_title}\n"
+                f"• **Chat ID:** `{chat_id}`\n"
+                f"• **Cooldown / Slowmode:** {cooldown_display}\n\n"
+                f"🔗 **Select Supported Link Type for this group:**\n"
+                f"_Choose whether this group allows external domain links or only internal t.me links:_"
+            )
+            buttons = [
+                [
+                    Button.inline("🔗 t.me only", data=f"linktype:{chat_id}:t_me"),
+                    Button.inline("🌐 Domain / External", data=f"linktype:{chat_id}:domain"),
+                ]
+            ]
+            try:
+                from bot.client import bot as telethon_bot
+                await telethon_bot.send_message(ADMIN_ID, prompt_text, buttons=buttons)
+            except Exception as e:
+                logger.error(f"Failed to send link-type selection prompt to Admin: {e}")
+
     except Exception as e:
         logger.error(f"Error adding group {raw_target}: {e}")
         await status_msg.edit(
@@ -47,7 +89,35 @@ async def process_add_group(event, raw_target, source_desc=""):
 
 
 def register_group_handlers(bot):
-    """Register all group-management command handlers with the bot client."""
+    """Register all group-management command handlers and callbacks with the bot client."""
+
+    @bot.on(events.CallbackQuery(pattern=r'^linktype:(-?\d+):(\w+)'))
+    async def link_type_callback(event):
+        """Handle inline button selection for group supported link type."""
+        if ADMIN_ID != 0 and event.sender_id != ADMIN_ID:
+            await event.answer("⚠️ Unauthorized. Only the bot admin can configure link types.", alert=True)
+            return
+
+        chat_id = int(event.pattern_match.group(1))
+        chosen_type = event.pattern_match.group(2)  # 't_me' or 'domain'
+
+        update_group_link_type(chat_id, chosen_type)
+        type_label = "🔗 t.me only" if chosen_type == "t_me" else "🌐 Domain / External"
+        await event.answer(f"Saved: {type_label}")
+
+        buttons = [
+            [
+                Button.inline(f"{'✅ ' if chosen_type == 't_me' else ''}🔗 t.me only", data=f"linktype:{chat_id}:t_me"),
+                Button.inline(f"{'✅ ' if chosen_type == 'domain' else ''}🌐 Domain / External", data=f"linktype:{chat_id}:domain"),
+            ]
+        ]
+        await event.edit(
+            f"📌 **Group Link Policy Configured!**\n\n"
+            f"🆔 **Chat ID:** `{chat_id}`\n"
+            f"📎 **Active Link Type:** **{type_label}**\n\n"
+            f"✅ Future scheduled posts to this group will use this link template.",
+            buttons=buttons,
+        )
 
     @bot.on(events.NewMessage(pattern=r'^/add_group'))
     async def add_group_cmd(event):
@@ -99,14 +169,25 @@ def register_group_handlers(bot):
             await event.respond("📊 **Total Groups:** `0`\n📂 No groups are currently saved in the database.")
             return
 
-        text = f"📊 **Total Groups:** `{total_count}`\n\n📋 **Scheduled Groups in Database:**\n\n"
+        text = f"📊 **Total Scheduled Groups:** `{total_count}`\n\n"
         current_time = time.time()
         for group in groups:
             title = group.get("title", "Unknown")
             cid = group.get("chat_id")
-            last_posted = group.get("last_posted", 0)
-            elapsed = current_time - last_posted
-            time_left = max(0, int((3600 - elapsed) / 60))
-            text += f"• **{title}** (`{cid}`)\n  └ ⏱️ Next Post In: ~{time_left} mins\n\n"
+            link_type = group.get("link_type", "t_me")
+            link_badge = "🔗 t.me only" if link_type == "t_me" else "🌐 Domain / External"
+            cooldown_val = group.get("cooldown_seconds", 0)
+            cooldown_badge = f"`{cooldown_val}s`" if cooldown_val > 0 else "`None`"
+
+            next_post_at = group.get("next_post_at", current_time)
+            remaining_secs = max(0, int(next_post_at - current_time))
+            time_left_mins = int(remaining_secs / 60)
+
+            text += (
+                f"• **{title}** (`{cid}`)\n"
+                f"  ├ 📎 Policy: {link_badge}\n"
+                f"  ├ ⏱️ Cooldown: {cooldown_badge}\n"
+                f"  └ ⏳ Next Post: in ~{time_left_mins} mins ({remaining_secs}s)\n\n"
+            )
 
         await event.respond(text)

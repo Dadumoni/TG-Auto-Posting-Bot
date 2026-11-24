@@ -1,10 +1,10 @@
 from telethon import events, utils
 from bot.database import (
     get_all_groups_db,
-    get_custom_message,
+    get_all_custom_messages,
     set_custom_message,
 )
-from bot.utils import parse_chat_target, resolve_chat_entity
+from bot.utils import parse_chat_target, resolve_chat_entity, detect_group_cooldown
 
 
 def register_base_commands(bot):
@@ -22,14 +22,17 @@ def register_base_commands(bot):
             "1. Send a public or private Telegram link / @username.\n"
             "2. Forward any message directly from the target group.\n"
             "3. Use `/add_group <target>` command.\n\n"
-            "**Available Commands:**\n"
-            "• `/set_message <text>` - Configure promotional post message\n"
-            "• `/get_message` - View the saved post message\n"
-            "• `/add_group <target>` - Add group by link, username, or ID\n"
+            "**Message Template Commands:**\n"
+            "• `/set_message <text>` - Set default post message\n"
+            "• `/set_tme_message <text>` - Set post message with t.me link only\n"
+            "• `/set_domain_message <text>` - Set post message with domain/external link\n"
+            "• `/get_message` - View all configured message templates\n\n"
+            "**Group Management Commands:**\n"
+            "• `/add_group <target>` - Add group (detects cooldown & sends initial post)\n"
             "• `/remove_group <id>` - Remove a group from scheduler\n"
             "• `/remove_all` - Clear all groups from database\n"
-            "• `/all_groups` - List all scheduled groups and countdowns\n"
-            "• `/debug <target>` - Check Userbot access to a group"
+            "• `/all_groups` - List scheduled groups, link types, and countdowns\n"
+            "• `/debug <target>` - Check Userbot access & slowmode cooldown"
         )
 
     @bot.on(events.NewMessage(pattern=r'^/debug'))
@@ -47,11 +50,15 @@ def register_base_commands(bot):
             chat = await resolve_chat_entity(raw_target)
             peer_id = utils.get_peer_id(chat)
             title = getattr(chat, 'title', getattr(chat, 'first_name', 'Target'))
+            cooldown_val = await detect_group_cooldown(chat)
+            cooldown_str = f"`{cooldown_val}s`" if cooldown_val > 0 else "`None`"
+
             await status_msg.edit(
                 f"✅ **Target Accessible by Userbot!**\n\n"
                 f"• **Title:** {title}\n"
                 f"• **Peer ID:** `{peer_id}`\n"
-                f"• **Entity Type:** `{type(chat).__name__}`"
+                f"• **Entity Type:** `{type(chat).__name__}`\n"
+                f"• **Slowmode Cooldown:** {cooldown_str}"
             )
         except Exception as e:
             await status_msg.edit(
@@ -60,17 +67,45 @@ def register_base_commands(bot):
                 "**Check:** Ensure the account associated with `SESSION_STRING` has joined this chat."
             )
 
-    @bot.on(events.NewMessage(pattern=r'^/set_message'))
+    @bot.on(events.NewMessage(pattern=r'^/set_message(?:\s|$)'))
     async def set_message_cmd(event):
         if not event.is_private:
             return
         parts = (event.text or "").split(maxsplit=1)
         if len(parts) < 2:
-            await event.respond("❌ **Usage:** `/set_message Enter your post text here...`")
+            await event.respond("❌ **Usage:** `/set_message Enter your default post text here...`")
             return
         custom_text = parts[1]
-        if set_custom_message(custom_text):
-            await event.respond(f"✅ **New Post Message Saved!**\n\n**Preview:**\n{custom_text}")
+        if set_custom_message(custom_text, msg_type="default"):
+            await event.respond(f"✅ **Default Post Message Saved!**\n\n**Preview:**\n{custom_text}")
+        else:
+            await event.respond("❌ Failed to save message. Database connection error.")
+
+    @bot.on(events.NewMessage(pattern=r'^/(?:set_tme_message|set_message_tme)(?:\s|$)'))
+    async def set_tme_message_cmd(event):
+        if not event.is_private:
+            return
+        parts = (event.text or "").split(maxsplit=1)
+        if len(parts) < 2:
+            await event.respond("❌ **Usage:** `/set_tme_message Enter text with t.me link here...`")
+            return
+        custom_text = parts[1]
+        if set_custom_message(custom_text, msg_type="t_me"):
+            await event.respond(f"✅ **t.me Only Post Message Saved!**\n\n**Preview:**\n{custom_text}")
+        else:
+            await event.respond("❌ Failed to save message. Database connection error.")
+
+    @bot.on(events.NewMessage(pattern=r'^/(?:set_domain_message|set_message_domain)(?:\s|$)'))
+    async def set_domain_message_cmd(event):
+        if not event.is_private:
+            return
+        parts = (event.text or "").split(maxsplit=1)
+        if len(parts) < 2:
+            await event.respond("❌ **Usage:** `/set_domain_message Enter text with external domain link here...`")
+            return
+        custom_text = parts[1]
+        if set_custom_message(custom_text, msg_type="domain"):
+            await event.respond(f"✅ **Domain / External Post Message Saved!**\n\n**Preview:**\n{custom_text}")
         else:
             await event.respond("❌ Failed to save message. Database connection error.")
 
@@ -78,5 +113,18 @@ def register_base_commands(bot):
     async def get_message_cmd(event):
         if not event.is_private:
             return
-        msg = get_custom_message()
-        await event.respond(f"📌 **Current Saved Post Message:**\n\n{msg}")
+        all_msgs = get_all_custom_messages()
+        default_txt = all_msgs.get("default") or "_(Not set - uses fallback)_"
+        tme_txt = all_msgs.get("t_me") or "_(Not set - falls back to default)_"
+        domain_txt = all_msgs.get("domain") or "_(Not set - falls back to default)_"
+
+        reply = (
+            "📌 **Configured Post Message Templates:**\n\n"
+            f"**1. Default Post Message:**\n{default_txt}\n\n"
+            "──────────────────\n"
+            f"**2. t.me Only Template:**\n{tme_txt}\n\n"
+            "──────────────────\n"
+            f"**3. Domain / External Template:**\n{domain_txt}\n\n"
+            "💡 _Use `/set_message`, `/set_tme_message`, and `/set_domain_message` to customize._"
+        )
+        await event.respond(reply)

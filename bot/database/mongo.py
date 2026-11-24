@@ -22,34 +22,80 @@ except Exception as e:
     logger.error(f"Failed to connect to MongoDB: {e}")
 
 
-def get_custom_message() -> str:
-    """Retrieve the saved custom post message from the database."""
+def _resolve_config_type(msg_type: str) -> str:
+    """Normalize message type key for MongoDB config collection."""
+    clean_type = (msg_type or "").lower().strip()
+    if clean_type in ["tme", "t_me", "t.me"]:
+        return "post_message_tme"
+    if clean_type in ["domain", "ext", "external"]:
+        return "post_message_domain"
+    return "post_message"
+
+
+def get_custom_message(msg_type: str = "default") -> str:
+    """
+    Retrieve the configured post message.
+    If a specific type (e.g. t_me or domain) is requested but not set,
+    falls back to the default post_message.
+    """
     if config_collection is None:
         return "Custom post message is not configured. Please use /set_message first."
+
+    target_type = _resolve_config_type(msg_type)
     try:
-        config = config_collection.find_one({"type": "post_message"})
-        if config and "text" in config:
-            return config["text"]
+        # Try specific type first
+        if target_type != "post_message":
+            specific_cfg = config_collection.find_one({"type": target_type})
+            if specific_cfg and specific_cfg.get("text"):
+                return specific_cfg["text"]
+
+        # Fallback to default post_message
+        default_cfg = config_collection.find_one({"type": "post_message"})
+        if default_cfg and default_cfg.get("text"):
+            return default_cfg["text"]
     except Exception as e:
-        logger.error(f"Error reading custom message from DB: {e}")
+        logger.error(f"Error reading custom message ({msg_type}) from DB: {e}")
+
     return "Custom post message is not configured. Please use /set_message first."
 
 
-def set_custom_message(text: str) -> bool:
-    """Save or update the custom post message in the database."""
+def set_custom_message(text: str, msg_type: str = "default") -> bool:
+    """Save or update custom post message by type (default, t_me, or domain)."""
     if config_collection is None:
         logger.error("Cannot set custom message: MongoDB is not connected.")
         return False
+
+    target_type = _resolve_config_type(msg_type)
     try:
         config_collection.update_one(
-            {"type": "post_message"},
-            {"$set": {"text": text}},
+            {"type": target_type},
+            {"$set": {"text": text, "updated_at": time.time()}},
             upsert=True,
         )
         return True
     except Exception as e:
-        logger.error(f"Error updating custom message in DB: {e}")
+        logger.error(f"Error updating custom message ({target_type}) in DB: {e}")
         return False
+
+
+def get_all_custom_messages() -> Dict[str, Optional[str]]:
+    """Retrieve all configured custom messages."""
+    result: Dict[str, Optional[str]] = {"default": None, "t_me": None, "domain": None}
+    if config_collection is None:
+        return result
+    try:
+        for doc in config_collection.find({"type": {"$in": ["post_message", "post_message_tme", "post_message_domain"]}}):
+            dtype = doc.get("type")
+            text = doc.get("text")
+            if dtype == "post_message":
+                result["default"] = text
+            elif dtype == "post_message_tme":
+                result["t_me"] = text
+            elif dtype == "post_message_domain":
+                result["domain"] = text
+    except Exception as e:
+        logger.error(f"Error fetching all custom messages: {e}")
+    return result
 
 
 def is_group_exists(chat_id: int) -> bool:
@@ -63,21 +109,98 @@ def is_group_exists(chat_id: int) -> bool:
         return False
 
 
-def add_group_db(chat_id: int, title: str) -> bool:
-    """Add or update a group record in the database."""
+def get_group_db(chat_id: int) -> Optional[Dict[str, Any]]:
+    """Retrieve a single group record by chat_id."""
+    if groups_collection is None:
+        return None
+    try:
+        return groups_collection.find_one({"chat_id": chat_id})
+    except Exception as e:
+        logger.error(f"Error fetching group {chat_id}: {e}")
+        return None
+
+
+def add_group_db(
+    chat_id: int,
+    title: str,
+    cooldown_seconds: int = 0,
+    link_type: str = "t_me",
+    next_post_at: Optional[float] = None,
+) -> bool:
+    """Add or update a group record with cooldown, link type, and scheduling metadata."""
     if groups_collection is None:
         logger.error("Cannot add group: MongoDB is not connected.")
         return False
+
+    now = time.time()
+    update_data: Dict[str, Any] = {
+        "title": title,
+        "last_posted": now,
+        "cooldown_seconds": cooldown_seconds,
+        "link_type": link_type,
+        "next_post_at": next_post_at if next_post_at is not None else now,
+    }
     try:
         groups_collection.update_one(
             {"chat_id": chat_id},
-            {"$set": {"title": title, "last_posted": time.time()}},
+            {"$set": update_data},
             upsert=True,
         )
         return True
     except Exception as e:
         logger.error(f"Error saving group {chat_id} to DB: {e}")
         return False
+
+
+def update_group_link_type(chat_id: int, link_type: str) -> bool:
+    """Update supported link type ('t_me' or 'domain') for a group."""
+    if groups_collection is None:
+        return False
+    clean_type = "domain" if link_type.lower() in ["domain", "ext", "external"] else "t_me"
+    try:
+        groups_collection.update_one(
+            {"chat_id": chat_id},
+            {"$set": {"link_type": clean_type}},
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error updating link_type for group {chat_id}: {e}")
+        return False
+
+
+def update_group_cooldown(chat_id: int, cooldown_seconds: int) -> bool:
+    """Update slowmode/cooldown timer in seconds for a group."""
+    if groups_collection is None:
+        return False
+    try:
+        groups_collection.update_one(
+            {"chat_id": chat_id},
+            {"$set": {"cooldown_seconds": max(0, int(cooldown_seconds))}},
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error updating cooldown for group {chat_id}: {e}")
+        return False
+
+
+def update_group_schedule(chat_id: int, last_posted: float, next_post_at: float) -> bool:
+    """Update both last_posted and next_post_at timestamps for a group."""
+    if groups_collection is None:
+        return False
+    try:
+        groups_collection.update_one(
+            {"chat_id": chat_id},
+            {"$set": {"last_posted": last_posted, "next_post_at": next_post_at}},
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error updating schedule for group {chat_id}: {e}")
+        return False
+
+
+def update_last_posted(chat_id: int, post_time: float) -> bool:
+    """Backward-compatible helper to update last_posted timestamp."""
+    return update_group_schedule(chat_id, last_posted=post_time, next_post_at=post_time)
 
 
 def remove_group_db(chat_id: int) -> bool:
@@ -112,18 +235,3 @@ def get_all_groups_db() -> List[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"Error fetching groups from DB: {e}")
         return []
-
-
-def update_last_posted(chat_id: int, post_time: float) -> bool:
-    """Update the last_posted timestamp for a group."""
-    if groups_collection is None:
-        return False
-    try:
-        groups_collection.update_one(
-            {"chat_id": chat_id},
-            {"$set": {"last_posted": post_time}},
-        )
-        return True
-    except Exception as e:
-        logger.error(f"Error updating last_posted for {chat_id}: {e}")
-        return False
