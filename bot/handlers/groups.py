@@ -136,6 +136,94 @@ async def process_add_group(event, raw_target, source_desc=""):
         )
 
 
+GROUPS_PER_PAGE = 10
+
+
+def _get_scheduler_status_header(current_time: float) -> str:
+    """Return formatted scheduler status label for /all_groups header."""
+    if is_flood_locked():
+        lock_info = get_flood_safety_lock() or {}
+        rem_secs = max(0, int(lock_info.get("cooloff_until", 0) - current_time))
+        rem_hrs, rem_mins = divmod(rem_secs // 60, 60)
+        return f"🛑 Flood Locked ({rem_hrs}h {rem_mins}m left)"
+    if is_posting_active():
+        return "🟢 Active (Posting Enabled)"
+    return "🔴 Paused via /stop"
+
+
+def _build_groups_page(page: int = 1):
+    """
+    Build paginated inline-button message for scheduled groups (up to 10 per page).
+    Pagination controls appear only when total groups exceed 10.
+    """
+    groups = get_all_groups_db()
+    total_count = len(groups)
+    if total_count == 0:
+        return None, None, 0
+
+    total_pages = (total_count + GROUPS_PER_PAGE - 1) // GROUPS_PER_PAGE
+    page = max(1, min(page, total_pages))
+
+    start_idx = (page - 1) * GROUPS_PER_PAGE
+    page_groups = groups[start_idx : start_idx + GROUPS_PER_PAGE]
+
+    status_header = _get_scheduler_status_header(time.time())
+    header = (
+        f"📊 **Total Scheduled Groups:** `{total_count}` | {status_header}\n\n"
+        "👇 _Click any group below to view full details:_"
+    )
+
+    buttons = []
+    for g in page_groups:
+        cid = g.get("chat_id")
+        title = escape_md(g.get("title", "Unknown Group")) or "Unknown Group"
+        btn_label = title if len(title) <= 45 else f"{title[:42]}..."
+        buttons.append([Button.inline(btn_label, data=f"grpview:{cid}:{page}")])
+
+    # Add pagination row ONLY if more than 10 groups exist
+    if total_count > GROUPS_PER_PAGE:
+        prev_btn = (
+            Button.inline("⬅️ Prev", data=f"grppage:{page - 1}")
+            if page > 1
+            else Button.inline("⬅️ Prev", data=b"grppage_noop:first")
+        )
+        center_btn = Button.inline(f"📄 {page}/{total_pages}", data=f"grppage_noop:page_{page}_{total_pages}")
+        next_btn = (
+            Button.inline("Next ➡️", data=f"grppage:{page + 1}")
+            if page < total_pages
+            else Button.inline("Next ➡️", data=b"grppage_noop:last")
+        )
+        buttons.append([prev_btn, center_btn, next_btn])
+
+    return header, buttons, total_count
+
+
+def _format_group_detail(group: dict, index_num: int) -> str:
+    """Format detailed status card for a single selected group."""
+    current_time = time.time()
+    title = escape_md(group.get("title", "Unknown"))
+    cid = group.get("chat_id")
+    link_type = group.get("link_type", "t_me")
+    link_badge = "🔗 t.me" if link_type == "t_me" else "🌐 Domain"
+    cooldown_val = group.get("cooldown_seconds", 0)
+    cooldown_str = f"{cooldown_val}s" if cooldown_val > 0 else "None"
+
+    next_post_at = group.get("next_post_at", current_time)
+    remaining_secs = max(0, int(next_post_at - current_time))
+    time_left_mins = remaining_secs // 60
+    next_label = f"in ~{time_left_mins}m ({remaining_secs}s)" if remaining_secs > 0 else "due now"
+
+    allow_text = group.get("allow_text", True)
+    text_badge = "✅ Text+Emoji" if allow_text else "🚫 Link Only"
+
+    return (
+        f"**{index_num}. {title}** (`{cid}`)\n"
+        f"   ├ 📎 Policy: {link_badge} | {text_badge}\n"
+        f"   ├ ⏱️ Cooldown: `{cooldown_str}`\n"
+        f"   └ ⏳ Next Post: `{next_label}`"
+    )
+
+
 def register_group_handlers(bot):
     """Register all group-management command handlers and callbacks with the bot client."""
 
@@ -268,6 +356,74 @@ def register_group_handlers(bot):
             logger.error(f"Error in remove_all_groups_cmd: {e}")
             await event.respond(f"❌ Error clearing groups: `{e}`")
 
+    @bot.on(events.CallbackQuery(pattern=r'^grppage:(\d+)$'))
+    async def groups_page_callback(event):
+        """Navigate between /all_groups pages cleanly on the same message."""
+        try:
+            if not _is_authorized(event):
+                await event.answer("⚠️ Unauthorized.", alert=True)
+                return
+
+            page = int(event.pattern_match.group(1))
+            text, buttons, total_count = _build_groups_page(page)
+            if total_count == 0:
+                await event.edit("📭 **Total Groups:** `0`\nNo groups are currently scheduled in the database.")
+                await event.answer()
+                return
+
+            await event.edit(text, buttons=buttons)
+            await event.answer()
+        except Exception as e:
+            logger.error(f"Error in groups_page_callback: {e}")
+
+    @bot.on(events.CallbackQuery(pattern=r'^grppage_noop:(\w+)$'))
+    async def groups_page_noop_callback(event):
+        """Provide feedback when tapping boundary/page-indicator buttons."""
+        raw_tag = event.pattern_match.group(1)
+        tag = raw_tag.decode("utf-8") if isinstance(raw_tag, bytes) else str(raw_tag)
+        if tag == "first":
+            await event.answer("Already on the first page.")
+        elif tag == "last":
+            await event.answer("Already on the last page.")
+        else:
+            await event.answer("Current page indicator.")
+
+    @bot.on(events.CallbackQuery(pattern=r'^grpview:(-?\d+):(\d+)$'))
+    async def group_detail_callback(event):
+        """Show full group details when a group inline button is clicked."""
+        try:
+            if not _is_authorized(event):
+                await event.answer("⚠️ Unauthorized.", alert=True)
+                return
+
+            chat_id = int(event.pattern_match.group(1))
+            page = int(event.pattern_match.group(2))
+
+            groups = get_all_groups_db()
+            target_group = None
+            index_num = 1
+            for idx, g in enumerate(groups, start=1):
+                if g.get("chat_id") == chat_id:
+                    target_group = g
+                    index_num = idx
+                    break
+
+            if not target_group:
+                await event.answer("⚠️ Group was removed from database.", alert=True)
+                text, buttons, total_count = _build_groups_page(page)
+                if total_count > 0:
+                    await event.edit(text, buttons=buttons)
+                else:
+                    await event.edit("📭 **Total Groups:** `0`\nNo groups are currently scheduled in the database.")
+                return
+
+            detail_text = _format_group_detail(target_group, index_num)
+            back_buttons = [[Button.inline("⬅️ Back to Groups", data=f"grppage:{page}")]]
+            await event.edit(detail_text, buttons=back_buttons)
+            await event.answer()
+        except Exception as e:
+            logger.error(f"Error in group_detail_callback: {e}")
+
     @bot.on(events.NewMessage(pattern=r'(?i)^(?:/all_groups|/allgroups|all\s*groups)(?:@\w+)?(?:\s|$)'))
     async def all_groups_cmd(event):
         if not event.is_private:
@@ -276,58 +432,21 @@ def register_group_handlers(bot):
             await event.respond("⚠️ Unauthorized. Only the bot admin can view groups.")
             return
 
+        # Delete user's /all_groups command message after 10 seconds
+        schedule_message_cleanup(event, delay=10.0)
+
         try:
-            groups = get_all_groups_db()
-            total_count = len(groups)
-            if not groups:
-                await event.respond("📭 **Total Groups:** `0`\nNo groups are currently scheduled in the database.")
+            text, buttons, total_count = _build_groups_page(page=1)
+            if total_count == 0:
+                empty_msg = await event.respond(
+                    "📭 **Total Groups:** `0`\nNo groups are currently scheduled in the database."
+                )
+                schedule_message_cleanup(empty_msg, delay=10.0)
                 return
 
-            current_time = time.time()
-            if is_flood_locked():
-                lock_info = get_flood_safety_lock() or {}
-                rem_secs = max(0, int(lock_info.get("cooloff_until", 0) - current_time))
-                rem_hrs, rem_mins = divmod(rem_secs // 60, 60)
-                status_header = f"🛑 Status: Flood Locked ({rem_hrs}h {rem_mins}m left)"
-            elif is_posting_active():
-                status_header = "🟢 Status: Active (Posting Enabled)"
-            else:
-                status_header = "🔴 Status: Paused via /stop"
-
-            header = f"📊 **Total Scheduled Groups:** `{total_count}` | {status_header}\n\n"
-            chunk = header
-
-            for i, group in enumerate(groups, start=1):
-                raw_title = group.get("title", "Unknown")
-                title = escape_md(raw_title)
-                cid = group.get("chat_id")
-                link_type = group.get("link_type", "t_me")
-                link_badge = "🔗 t.me" if link_type == "t_me" else "🌐 Domain"
-                cooldown_val = group.get("cooldown_seconds", 0)
-                cooldown_badge = f"`{cooldown_val}s`" if cooldown_val > 0 else "`None`"
-
-                next_post_at = group.get("next_post_at", current_time)
-                remaining_secs = max(0, int(next_post_at - current_time))
-                time_left_mins = remaining_secs // 60
-
-                allow_text = group.get("allow_text", True)
-                text_badge = "✅ Text+Emoji" if allow_text else "🚫 Link Only"
-                next_label = f"in ~{time_left_mins}m ({remaining_secs}s)" if remaining_secs > 0 else "due now"
-
-                entry = (
-                    f"{i}. **{title}** (`{cid}`)\n"
-                    f"   ├ 📎 Policy: {link_badge} | {text_badge}\n"
-                    f"   ├ ⏱️ Cooldown: {cooldown_badge}\n"
-                    f"   └ ⏳ Next Post: `{next_label}`\n\n"
-                )
-
-                if len(chunk) + len(entry) > 3500:
-                    await event.respond(chunk)
-                    chunk = ""
-                chunk += entry
-
-            if chunk.strip():
-                await event.respond(chunk)
+            list_msg = await event.respond(text, buttons=buttons)
+            # Auto-delete group list message from DM after 10 minutes
+            schedule_message_cleanup(list_msg, delay=600.0)
 
         except Exception as e:
             logger.error(f"Error in all_groups_cmd: {e}")
