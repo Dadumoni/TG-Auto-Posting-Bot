@@ -18,6 +18,26 @@ FLOOD_UPDATE_INTERVAL: int = 600  # 10 minutes update interval (600s)
 _active_flood_updater_task: Optional[asyncio.Task] = None
 
 
+async def _safe_edit_or_notify(alert_msg_id: int, text: str):
+    """Edit the existing flood alert message or send a fresh notification if editing fails."""
+    try:
+        if alert_msg_id and ADMIN_ID != 0 and telethon_bot.is_connected():
+            await telethon_bot.edit_message(ADMIN_ID, alert_msg_id, text)
+            return
+    except Exception as e:
+        logger.debug(f"Failed to edit flood lock alert message {alert_msg_id}: {e}")
+    await notify_admin(text)
+
+
+def cancel_flood_updater_task():
+    """Cancel the active background flood countdown updater task, if running."""
+    global _active_flood_updater_task
+    if _active_flood_updater_task and not _active_flood_updater_task.done():
+        _active_flood_updater_task.cancel()
+        _active_flood_updater_task = None
+        logger.info("Flood safety lock periodic updater stopped due to manual override.")
+
+
 async def flood_lock_periodic_updater(alert_msg_id: int, cooloff_until: float):
     """
     Background task that updates the admin alert message every 10 minutes

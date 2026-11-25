@@ -12,11 +12,23 @@ config_collection: Optional[Collection] = None
 
 try:
     if MONGO_URI:
-        mongo_client = MongoClient(MONGO_URI)
+        mongo_client = MongoClient(
+            MONGO_URI,
+            maxPoolSize=5,
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=5000,
+            socketTimeoutMS=10000,
+        )
         db = mongo_client[DB_NAME]
         groups_collection = db["groups"]
         config_collection = db["config"]
-        logger.info(f"Successfully connected to MongoDB database: {DB_NAME}")
+        # Create non-destructive indexes to keep lookups fast without touching existing data
+        try:
+            groups_collection.create_index("chat_id")
+            config_collection.create_index("type")
+        except Exception as idx_err:
+            logger.debug(f"Index check skipped: {idx_err}")
+        logger.info(f"Connected to MongoDB database: {DB_NAME}")
     else:
         logger.warning("MONGO_URI not provided. Database functionality will be disabled.")
 except Exception as e:

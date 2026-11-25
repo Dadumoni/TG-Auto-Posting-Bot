@@ -13,6 +13,7 @@ from bot.config import (
 )
 from bot.database import (
     is_posting_active,
+    is_flood_locked,
     get_custom_message,
     get_group_db,
     update_group_schedule,
@@ -60,8 +61,16 @@ async def post_to_single_group(
     and slowmode cooldown handling.
     """
     async with posting_lock:
+        if is_flood_locked():
+            logger.info(f"Skipping post to '{group_title}' ({chat_id}): 6-hour FloodWait safety lock active.")
+            return False
+
         if not is_posting_active():
             logger.info(f"Skipping post to '{group_title}' ({chat_id}): Auto-posting is stopped via /stop.")
+            return False
+
+        if not user.is_connected():
+            logger.warning(f"Skipping post to '{group_title}' ({chat_id}): Userbot is not connected.")
             return False
 
         logger.info(f"Attempting post to group: '{group_title}' (ID: {chat_id})...")
