@@ -6,13 +6,26 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# Setup logging format and level
+# Setup clean structured logging format and silence noisy third-party loggers
+_raw_log_level = os.getenv("LOG_LEVEL", "INFO").strip().upper()
+_log_level = getattr(logging, _raw_log_level, logging.INFO)
+
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - [%(levelname)s] - %(message)s",
+    level=_log_level,
+    format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[logging.StreamHandler(sys.stdout)],
+    force=True,
 )
+
+# Silence noisy Telethon background/update/network INFO logs (e.g., "Got difference for channel ... updates")
+logging.getLogger("telethon").setLevel(logging.WARNING)
+logging.getLogger("telethon.client.updates").setLevel(logging.ERROR)
+logging.getLogger("aiohttp").setLevel(logging.WARNING)
+logging.getLogger("pymongo").setLevel(logging.WARNING)
+
 logger = logging.getLogger("TG-Auto-Poster")
+logger.setLevel(_log_level)
 
 # Telegram API Configuration
 raw_api_id = os.getenv("API_ID", "").strip()

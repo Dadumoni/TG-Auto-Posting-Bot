@@ -1,7 +1,8 @@
 from typing import Union, Any, Dict
 from telethon import utils
 from telethon.tl.functions.channels import GetFullChannelRequest
-from telethon.tl.types import Channel
+from telethon.tl.functions.messages import CheckChatInviteRequest
+from telethon.tl.types import Channel, ChatInviteAlready
 from bot.client import user
 from bot.config import logger
 
@@ -9,15 +10,34 @@ from bot.config import logger
 async def resolve_chat_entity(chat_identifier: Union[int, str]) -> Any:
     """
     Resolve a Telegram chat entity using the Userbot client.
-    Attempts direct resolution first, then scans user dialogs if necessary.
+    Supports invite hashes, usernames, peer IDs, bare channel IDs, and dialog scan fallback.
     """
+    if not user.is_connected():
+        raise ConnectionError("Userbot client is not connected. Verify SESSION_STRING in environment variables.")
+
+    # Handle private invite link parsed as 'invite:<hash>'
+    if isinstance(chat_identifier, str) and chat_identifier.startswith("invite:"):
+        invite_hash = chat_identifier.split("invite:", 1)[1]
+        invite_info = await user(CheckChatInviteRequest(invite_hash))
+        if isinstance(invite_info, ChatInviteAlready):
+            return invite_info.chat
+        title = getattr(invite_info, "title", "this private group")
+        raise ValueError(
+            f"Userbot has not joined '{title}' yet. Please join using the invite link with your Userbot account first."
+        )
+
     try:
         return await user.get_entity(chat_identifier)
-    except Exception:
-        logger.info(f"Direct entity resolution failed for '{chat_identifier}', scanning dialogs...")
+    except Exception as direct_err:
+        logger.info(f"Direct resolution failed for '{chat_identifier}' ({type(direct_err).__name__}), scanning dialogs...")
         async for dialog in user.iter_dialogs(limit=None):
             peer_id = utils.get_peer_id(dialog.entity)
-            if peer_id == chat_identifier or dialog.id == chat_identifier:
+            raw_entity_id = getattr(dialog.entity, 'id', None)
+            if (
+                peer_id == chat_identifier
+                or dialog.id == chat_identifier
+                or (isinstance(chat_identifier, int) and raw_entity_id == chat_identifier)
+            ):
                 return dialog.entity
 
             username = getattr(dialog.entity, 'username', None)

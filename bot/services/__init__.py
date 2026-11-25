@@ -6,6 +6,7 @@ from .emergency import (
     trigger_flood_emergency_lock,
     check_and_resume_flood_lock,
     flood_lock_periodic_updater,
+    cancel_flood_updater_task,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "trigger_flood_emergency_lock",
     "check_and_resume_flood_lock",
     "flood_lock_periodic_updater",
+    "cancel_flood_updater_task",
 ]

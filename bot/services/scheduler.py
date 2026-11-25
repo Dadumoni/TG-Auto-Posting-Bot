@@ -33,6 +33,11 @@ async def auto_post_scheduler():
             groups = get_all_groups_db()
 
             for group in groups:
+                # Re-check lock/pause state inside loop so FloodWait or /stop halts remaining groups immediately
+                if is_flood_locked() or not is_posting_active():
+                    logger.info("Scheduler cycle halted mid-pass due to FloodLock or /stop.")
+                    break
+
                 chat_id = group.get("chat_id")
                 title = group.get("title", "Group")
                 last_posted = group.get("last_posted", 0)

@@ -1,28 +1,31 @@
-FROM python:3.10-slim
+FROM python:3.10-slim AS builder
 
-# Set environment variables for clean Python execution
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PORT=8080
+WORKDIR /build
 
-WORKDIR /app
-
-# Install system dependencies required for compiling telethon/cryptg C-extensions
+# Install build tools only in builder stage to compile any C-extensions cleanly
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     python3-dev \
     libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy dependency specification and install Python libraries
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip wheel --no-cache-dir --wheel-dir /wheels -r requirements.txt
 
-# Copy application source code
+FROM python:3.10-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PORT=8080
+
+WORKDIR /app
+
+# Install only prebuilt wheels (no gcc/headers in final image -> lightweight footprint)
+COPY --from=builder /wheels /wheels
+RUN pip install --no-cache-dir --no-index --find-links=/wheels /wheels/* && rm -rf /wheels
+
 COPY . .
 
-# Expose HTTP health check port
 EXPOSE 8080
 
-# Run the Telegram Auto-Posting Bot
 CMD ["python", "main.py"]
