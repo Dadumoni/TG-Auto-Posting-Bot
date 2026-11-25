@@ -1,18 +1,13 @@
 import asyncio
-import re
 import time
 from telethon import events, Button
 from telethon.tl.types import Channel
-from bot.client import bot, user
+from bot.client import bot
 from bot.config import ADMIN_ID, logger
 from bot.database import (
     is_posting_active,
     set_bot_posting_status,
     get_all_groups_db,
-    remove_group_db,
-    remove_all_groups_db,
-    get_all_custom_messages,
-    set_custom_message,
     get_link_db,
     set_link_db,
     get_base_text_db,
@@ -25,6 +20,7 @@ from bot.database import (
     get_flood_safety_lock,
     clear_flood_safety_lock,
 )
+from bot.services.emergency import cancel_flood_updater_task
 from bot.utils import parse_chat_target, resolve_chat_entity, detect_group_cooldown
 
 # In-memory storage for interactive /set_message link prompt flow
@@ -36,10 +32,27 @@ def is_user_waiting_input(user_id: int) -> bool:
     return user_id in pending_link_config
 
 
+def _is_authorized(event) -> bool:
+    """Verify sender is authorized admin when ADMIN_ID is configured."""
+    return ADMIN_ID == 0 or event.sender_id == ADMIN_ID
+
+
+async def _delayed_delete(*messages, delay: float = 2.0):
+    """Auto-delete temporary setup messages after a short delay."""
+    await asyncio.sleep(delay)
+    for msg in messages:
+        if msg is not None:
+            try:
+                await msg.delete()
+            except Exception as e:
+                logger.debug(f"Auto-delete skipped: {e}")
+
+
 def register_command_handlers(bot_instance=None):
     """Register core utility and configuration bot commands."""
+    target_bot = bot_instance or bot
 
-    @bot.on(events.NewMessage(pattern=r'(?i)^/start(?:@\w+)?(?:\s|$)'))
+    @target_bot.on(events.NewMessage(pattern=r'(?i)^/start(?:@\w+)?(?:\s|$)'))
     async def start_cmd(event):
         if not event.is_private:
             return
@@ -48,8 +61,7 @@ def register_command_handlers(bot_instance=None):
             if is_flood_locked():
                 lock_info = get_flood_safety_lock() or {}
                 rem_secs = max(0, int(lock_info.get("cooloff_until", 0) - time.time()))
-                rem_hrs = int(rem_secs // 3600)
-                rem_mins = int((rem_secs % 3600) // 60)
+                rem_hrs, rem_mins = divmod(rem_secs // 60, 60)
                 status_icon = f"🛑 Flood Locked ({rem_hrs}h {rem_mins}m left)"
             elif is_posting_active():
                 status_icon = "🟢 Active"
@@ -63,7 +75,9 @@ def register_command_handlers(bot_instance=None):
                 "• `/all_groups` - View scheduled groups & policies\n"
                 "• `/add_group <target>` - Add group (detects cooldown & link policy)\n"
                 "• `/remove_group <id>` - Remove a group\n"
+                "• `/remove_all` - Clear all saved groups\n"
                 "• `/add_text <texts>` - Add custom texts {text1, text2}\n"
+                "• `/clear_texts` - Clear custom texts pool\n"
                 "• `/set_message` - Configure links & post text\n"
                 "• `/get_message` - View configured links & previews\n"
                 "• `/stop` / `/restart` - Pause / resume auto-posting\n"
@@ -73,16 +87,17 @@ def register_command_handlers(bot_instance=None):
             logger.error(f"Error in start_cmd: {e}")
             await event.respond("❌ An error occurred. Please verify database connectivity.")
 
-    @bot.on(events.NewMessage(pattern=r'(?i)^/stop(?:@\w+)?(?:\s|$)'))
+    @target_bot.on(events.NewMessage(pattern=r'(?i)^/stop(?:@\w+)?(?:\s|$)'))
     async def stop_cmd(event):
         if not event.is_private:
             return
         try:
-            if ADMIN_ID != 0 and event.sender_id != ADMIN_ID:
+            if not _is_authorized(event):
                 await event.respond("⚠️ Unauthorized. Only the bot admin can stop auto-posting.")
                 return
 
             set_bot_posting_status(False)
+            logger.info(f"[CMD] /stop executed by {event.sender_id}")
             await event.respond(
                 "🛑 **Auto-Posting Paused!**\n\n"
                 "The bot has been stopped and will **not** post to any group.\n"
@@ -94,21 +109,23 @@ def register_command_handlers(bot_instance=None):
             logger.error(f"Error in stop_cmd: {e}")
             await event.respond(f"❌ Failed to stop auto-posting: `{e}`")
 
-    @bot.on(events.NewMessage(pattern=r'(?i)^/(?:restart|resume)(?:@\w+)?(?:\s|$)'))
+    @target_bot.on(events.NewMessage(pattern=r'(?i)^/(?:restart|resume)(?:@\w+)?(?:\s|$)'))
     async def restart_cmd(event):
         if not event.is_private:
             return
         try:
-            if ADMIN_ID != 0 and event.sender_id != ADMIN_ID:
+            if not _is_authorized(event):
                 await event.respond("⚠️ Unauthorized. Only the bot admin can restart auto-posting.")
                 return
 
             lock_note = ""
-            if is_flood_locked():
+            if is_flood_locked() or get_flood_safety_lock():
                 clear_flood_safety_lock()
+                cancel_flood_updater_task()
                 lock_note = "\n• ⚠️ Emergency 6-hour FloodWait safety lock was cleared by Admin override."
 
             set_bot_posting_status(True)
+            logger.info(f"[CMD] /restart executed by {event.sender_id}")
             await event.respond(
                 "▶️ **Auto-Posting Resumed & Restarted!**\n\n"
                 "The bot is now fully active.\n"
@@ -120,18 +137,23 @@ def register_command_handlers(bot_instance=None):
             logger.error(f"Error in restart_cmd: {e}")
             await event.respond(f"❌ Failed to restart auto-posting: `{e}`")
 
-    @bot.on(events.NewMessage(pattern=r'(?i)^/debug(?:@\w+)?(?:\s|$)'))
+    @target_bot.on(events.NewMessage(pattern=r'(?i)^/debug(?:@\w+)?(?:\s|$)'))
     async def debug_cmd(event):
         if not event.is_private:
             return
-        parts = event.text.split(maxsplit=1)
-        if len(parts) < 2:
+        if not _is_authorized(event):
+            await event.respond("⚠️ Unauthorized. Only the bot admin can run diagnostics.")
+            return
+
+        parts = (event.text or "").split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
             await event.respond("❌ **Usage:** `/debug <group_id|username|link>`")
             return
 
         target = parts[1].strip()
         chat_identifier = parse_chat_target(target)
         status_msg = await event.respond(f"🔍 Inspecting `{target}` with Userbot...")
+        logger.info(f"[CMD] /debug inspecting target={chat_identifier!r}")
 
         try:
             entity = await resolve_chat_entity(chat_identifier)
@@ -160,101 +182,7 @@ def register_command_handlers(bot_instance=None):
                 "• Ensure the Userbot has joined the chat and has view permissions."
             )
 
-    @bot.on(events.NewMessage(pattern=r'(?i)^/remove_all(?:@\w+)?(?:\s|$)'))
-    async def remove_all_cmd(event):
-        if not event.is_private:
-            return
-        try:
-            res = remove_all_groups_db()
-            deleted = res.deleted_count if res else 0
-            await event.respond(f"🗑️ Successfully removed **{deleted}** groups from the database.")
-        except Exception as e:
-            logger.error(f"Error in remove_all_cmd: {e}")
-            await event.respond("❌ Failed to clear groups from database.")
-
-    @bot.on(events.NewMessage(pattern=r'(?i)^/remove_group(?:@\w+)?(?:\s|$)'))
-    async def remove_group_cmd(event):
-        if not event.is_private:
-            return
-        parts = event.text.split(maxsplit=1)
-        if len(parts) < 2:
-            await event.respond("❌ **Usage:** `/remove_group <chat_id>`")
-            return
-
-        try:
-            target_id = int(parts[1].strip())
-            if remove_group_db(target_id):
-                await event.respond(f"✅ Group `{target_id}` removed from database.")
-            else:
-                await event.respond(f"⚠️ Group `{target_id}` not found in database.")
-        except ValueError:
-            await event.respond("❌ Invalid chat ID. Please provide a numeric group ID.")
-        except Exception as e:
-            logger.error(f"Error in remove_group_cmd: {e}")
-            await event.respond(f"❌ Failed to remove group: `{e}`")
-
-    @bot.on(events.NewMessage(pattern=r'(?i)^/all_groups(?:@\w+)?(?:\s|$)'))
-    async def all_groups_cmd(event):
-        if not event.is_private:
-            return
-        try:
-            groups = get_all_groups_db()
-            if not groups:
-                await event.respond("📭 No groups are currently scheduled in the database.")
-                return
-
-            now = time.time()
-            header = f"📊 **Scheduled Groups ({len(groups)} total):**\n\n"
-            group_lines = []
-
-            for i, g in enumerate(groups, start=1):
-                raw_title = str(g.get('title', 'Unknown Group'))
-                safe_title = (
-                    raw_title.replace('*', '')
-                    .replace('_', ' ')
-                    .replace('`', '')
-                    .replace('[', '(')
-                    .replace(']', ')')
-                )
-                chat_id = g.get('chat_id', 'Unknown')
-                cooldown = g.get('cooldown_seconds', 0)
-                link_type = g.get('link_type', 't_me')
-                allow_text = g.get('allow_text', True)
-                next_post_at = g.get('next_post_at', 0)
-
-                if next_post_at > now:
-                    remaining = int(next_post_at - now)
-                    next_str = f"in {remaining}s"
-                else:
-                    next_str = "due now"
-
-                cooldown_str = f"{cooldown}s" if cooldown > 0 else "None"
-                link_badge = "t.me" if link_type == "t_me" else "Domain"
-                mode_badge = "Text+Emoji" if allow_text else "LinkOnly"
-
-                group_lines.append(
-                    f"{i}. **{safe_title}**\n"
-                    f"   • ID: `{chat_id}` | Cooldown: `{cooldown_str}`\n"
-                    f"   • Policy: `{link_badge}` | `{mode_badge}`\n"
-                    f"   • Next Post: `{next_str}`"
-                )
-
-            # Split message into chunks if larger than 3500 characters
-            chunk = header
-            for line in group_lines:
-                if len(chunk) + len(line) + 2 > 3500:
-                    await event.respond(chunk)
-                    chunk = ""
-                chunk += line + "\n\n"
-
-            if chunk.strip():
-                await event.respond(chunk)
-
-        except Exception as e:
-            logger.error(f"Error in all_groups_cmd: {e}")
-            await event.respond(f"❌ Failed to retrieve groups: `{e}`")
-
-    @bot.on(events.NewMessage(pattern=r'(?i)^/set_message(?:@\w+)?(?:\s|$)'))
+    @target_bot.on(events.NewMessage(pattern=r'(?i)^/set_message(?:@\w+)?(?:\s|$)'))
     async def set_message_interactive_cmd(event):
         """
         Interactive /set_message handler:
@@ -263,15 +191,13 @@ def register_command_handlers(bot_instance=None):
         """
         if not event.is_private:
             return
-        if ADMIN_ID != 0 and event.sender_id != ADMIN_ID:
+        if not _is_authorized(event):
             await event.respond("⚠️ Unauthorized. Only the bot admin can set message templates.")
             return
 
-        parts = event.text.split(maxsplit=1)
-        # If user passed text directly with command
-        if len(parts) > 1:
+        parts = (event.text or "").split(maxsplit=1)
+        if len(parts) > 1 and parts[1].strip():
             raw_text = parts[1].strip()
-            # If it looks like a URL, save as link
             if "t.me" in raw_text:
                 set_link_db("t_me", raw_text)
                 await event.respond(f"✅ **t.me Link Configured Successfully!**\n\n`{raw_text}`")
@@ -283,7 +209,6 @@ def register_command_handlers(bot_instance=None):
                 await event.respond(f"✅ **Base Post Text Configured Successfully!**\n\n_{raw_text}_")
             return
 
-        # Interactive inline button prompt
         buttons = [
             [
                 Button.inline("🔗 t.me Link", data=b"cfglink_tme"),
@@ -303,47 +228,57 @@ def register_command_handlers(bot_instance=None):
             buttons=buttons,
         )
 
-    @bot.on(events.CallbackQuery(pattern=r'^cfglink_'))
+    @target_bot.on(events.CallbackQuery(pattern=r'^cfglink_'))
     async def link_config_callback(event):
         """Handle inline button selection for /set_message."""
         user_id = event.sender_id
-        if ADMIN_ID != 0 and user_id != ADMIN_ID:
+        if not _is_authorized(event):
             await event.answer("⚠️ Unauthorized", alert=True)
             return
 
         action = event.data.decode("utf-8")
         if action == "cfglink_cancel":
-            await event.delete()
+            pending_link_config.pop(user_id, None)
+            try:
+                await event.delete()
+            except Exception:
+                pass
+            await event.answer("Cancelled")
             return
 
         if action == "cfglink_tme":
-            pending_link_config[user_id] = {"target": "t_me", "time": time.time()}
             prompt_text = (
                 "🔗 **Please send your `t.me` link now:**\n\n"
                 "_Example:_ `https://t.me/hivezonebd` or `t.me/mychannel`\n\n"
-                "⏱️ _Reply within 60 seconds._"
+                "⏱️ _Reply within 120 seconds._"
             )
+            cfg_target = "t_me"
         elif action == "cfglink_domain":
-            pending_link_config[user_id] = {"target": "domain", "time": time.time()}
             prompt_text = (
                 "🌐 **Please send your External / Domain link now:**\n\n"
                 "_Example:_ `https://hivezonebd.pages.dev`\n\n"
-                "⏱️ _Reply within 60 seconds._"
+                "⏱️ _Reply within 120 seconds._"
             )
+            cfg_target = "domain"
         elif action == "cfglink_text":
-            pending_link_config[user_id] = {"target": "text", "time": time.time()}
             prompt_text = (
                 "📝 **Please send the Post Header Text:**\n\n"
                 "_Example:_ `Best Channel For Updates`\n\n"
-                "⏱️ _Reply within 60 seconds._"
+                "⏱️ _Reply within 120 seconds._"
             )
+            cfg_target = "text"
         else:
             return
 
-        await event.edit(prompt_text, buttons=[Button.inline("❌ Cancel", data=b"cfglink_cancel")])
+        prompt_msg = await event.edit(prompt_text, buttons=[Button.inline("❌ Cancel", data=b"cfglink_cancel")])
+        pending_link_config[user_id] = {
+            "target": cfg_target,
+            "time": time.time(),
+            "prompt_msg": prompt_msg,
+        }
         await event.answer()
 
-    @bot.on(events.NewMessage())
+    @target_bot.on(events.NewMessage())
     async def capture_link_input(event):
         """Capture text reply for pending /set_message configuration and auto-clean messages."""
         if not event.is_private:
@@ -352,8 +287,10 @@ def register_command_handlers(bot_instance=None):
         if user_id not in pending_link_config:
             return
 
-        # Skip if message is a command
-        if (event.text or "").startswith("/"):
+        raw_val = (event.text or "").strip()
+        # If user enters a new slash command instead, exit pending prompt cleanly and let the command run
+        if raw_val.startswith("/"):
+            pending_link_config.pop(user_id, None)
             return
 
         pending = pending_link_config.pop(user_id)
@@ -361,7 +298,11 @@ def register_command_handlers(bot_instance=None):
             return
 
         target = pending.get("target")
-        raw_val = (event.text or "").strip()
+        prompt_msg = pending.get("prompt_msg")
+
+        if not raw_val:
+            await event.respond("❌ Empty input ignored. Please run `/set_message` again.")
+            raise events.StopPropagation
 
         if target == "t_me":
             set_link_db("t_me", raw_val)
@@ -375,56 +316,51 @@ def register_command_handlers(bot_instance=None):
         else:
             return
 
-        # Auto-delete confirmation and prompt after 2 seconds to keep chat clean
-        await asyncio.sleep(2)
-        try:
-            await saved_msg.delete()
-            await event.delete()
-        except Exception as e:
-            logger.debug(f"Could not auto-delete link setup messages: {e}")
+        logger.info(f"[CMD] /set_message updated '{target}' via interactive flow")
+        asyncio.create_task(_delayed_delete(prompt_msg, event, saved_msg, delay=2.0))
+        raise events.StopPropagation
 
-    # Legacy command variants for backwards compatibility
-    @bot.on(events.NewMessage(pattern=r'(?i)^/set_tme_message(?:@\w+)?(?:\s|$)'))
+    @target_bot.on(events.NewMessage(pattern=r'(?i)^/set_tme_message(?:@\w+)?(?:\s|$)'))
     async def set_tme_msg_cmd(event):
         if not event.is_private:
             return
-        if ADMIN_ID != 0 and event.sender_id != ADMIN_ID:
+        if not _is_authorized(event):
             await event.respond("⚠️ Unauthorized.")
             return
-        parts = event.text.split(maxsplit=1)
-        if len(parts) < 2:
+        parts = (event.text or "").split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
             await event.respond("❌ **Usage:** `/set_tme_message <t.me link>`")
             return
         link = parts[1].strip()
         set_link_db("t_me", link)
         await event.respond(f"✅ **t.me Link Saved!**\n\n`{link}`")
 
-    @bot.on(events.NewMessage(pattern=r'(?i)^/set_domain_message(?:@\w+)?(?:\s|$)'))
+    @target_bot.on(events.NewMessage(pattern=r'(?i)^/set_domain_message(?:@\w+)?(?:\s|$)'))
     async def set_domain_msg_cmd(event):
         if not event.is_private:
             return
-        if ADMIN_ID != 0 and event.sender_id != ADMIN_ID:
+        if not _is_authorized(event):
             await event.respond("⚠️ Unauthorized.")
             return
-        parts = event.text.split(maxsplit=1)
-        if len(parts) < 2:
+        parts = (event.text or "").split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
             await event.respond("❌ **Usage:** `/set_domain_message <external url>`")
             return
         link = parts[1].strip()
         set_link_db("domain", link)
         await event.respond(f"✅ **Domain / External Link Saved!**\n\n`{link}`")
 
-    @bot.on(events.NewMessage(pattern=r'(?i)^/add_text(?:@\w+)?(?:\s|$)'))
+    @target_bot.on(events.NewMessage(pattern=r'(?i)^/add_text(?:@\w+)?(?:\s|$)'))
     async def add_text_cmd(event):
         """Add single or multiple custom promotional texts to rotation pool."""
         if not event.is_private:
             return
-        if ADMIN_ID != 0 and event.sender_id != ADMIN_ID:
+        if not _is_authorized(event):
             await event.respond("⚠️ Unauthorized. Only the bot admin can add custom texts.")
             return
 
         parts = (event.text or "").split(maxsplit=1)
-        if len(parts) < 2:
+        if len(parts) < 2 or not parts[1].strip():
             existing = get_custom_texts_db()
             existing_str = "\n".join(f"{i+1}. `{t}`" for i, t in enumerate(existing)) if existing else "_(No custom texts added yet)_"
             await event.respond(
@@ -438,11 +374,9 @@ def register_command_handlers(bot_instance=None):
             return
 
         raw = parts[1].strip()
-        # Remove surrounding curly braces if present
         if raw.startswith('{') and raw.endswith('}'):
             raw = raw[1:-1].strip()
 
-        # Split by comma
         new_items = [t.strip() for t in raw.split(',') if t.strip()]
         if not new_items:
             await event.respond("❌ Please provide at least one valid text.")
@@ -452,6 +386,7 @@ def register_command_handlers(bot_instance=None):
         added_str = "\n".join(f"• `{t}`" for t in new_items)
         total_str = "\n".join(f"{i+1}. `{t}`" for i, t in enumerate(updated_list))
 
+        logger.info(f"[CMD] /add_text added {len(new_items)} items (pool={len(updated_list)})")
         await event.respond(
             f"✅ **Custom Text(s) Saved to Rotation Pool!**\n\n"
             f"➕ **Newly Added ({len(new_items)}):**\n{added_str}\n\n"
@@ -459,21 +394,25 @@ def register_command_handlers(bot_instance=None):
             "🎲 _The bot will randomly pick one of these texts + emoji for each group post._"
         )
 
-    @bot.on(events.NewMessage(pattern=r'(?i)^/(?:clear_texts|clear_text)(?:@\w+)?(?:\s|$)'))
+    @target_bot.on(events.NewMessage(pattern=r'(?i)^/(?:clear_texts|clear_text)(?:@\w+)?(?:\s|$)'))
     async def clear_texts_cmd(event):
         """Clear custom texts rotation pool."""
         if not event.is_private:
             return
-        if ADMIN_ID != 0 and event.sender_id != ADMIN_ID:
+        if not _is_authorized(event):
             await event.respond("⚠️ Unauthorized. Only the bot admin can clear texts.")
             return
 
         clear_custom_texts_db()
+        logger.info(f"[CMD] /clear_texts executed by {event.sender_id}")
         await event.respond("🗑️ **Custom texts pool cleared.** Bot will use fallback header or links.")
 
-    @bot.on(events.NewMessage(pattern=r'(?i)^/get_message(?:@\w+)?(?:\s|$)'))
+    @target_bot.on(events.NewMessage(pattern=r'(?i)^/get_message(?:@\w+)?(?:\s|$)'))
     async def get_message_cmd(event):
         if not event.is_private:
+            return
+        if not _is_authorized(event):
+            await event.respond("⚠️ Unauthorized.")
             return
         try:
             tme_link = get_link_db("t_me") or "_(Not set)_"
