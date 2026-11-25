@@ -1,7 +1,7 @@
 """Utility functions for parsing, entity resolving, cooldown detection, and admin notifications."""
 from .parser import parse_chat_target
 from .resolver import resolve_chat_entity, detect_group_cooldown, diagnose_group_failure
-from .notifier import notify_admin
+from .notifier import notify_admin, schedule_message_cleanup, build_message_link
 
 __all__ = [
     "parse_chat_target",
@@ -9,4 +9,6 @@ __all__ = [
     "detect_group_cooldown",
     "diagnose_group_failure",
     "notify_admin",
+    "schedule_message_cleanup",
+    "build_message_link",
 ]

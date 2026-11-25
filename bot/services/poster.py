@@ -2,6 +2,7 @@ import asyncio
 import random
 import time
 from typing import Optional, Dict, Any
+from telethon import Button
 from telethon.errors import FloodWaitError, SlowModeWaitError
 from bot.client import user
 from bot.config import (
@@ -20,7 +21,13 @@ from bot.database import (
     update_group_cooldown,
     generate_group_post,
 )
-from bot.utils import resolve_chat_entity, notify_admin, diagnose_group_failure
+from bot.utils import (
+    resolve_chat_entity,
+    notify_admin,
+    diagnose_group_failure,
+    build_message_link,
+    schedule_message_cleanup,
+)
 
 # Posting lock to ensure only one post runs at any given time
 posting_lock = asyncio.Lock()
@@ -95,17 +102,20 @@ async def post_to_single_group(
             cooldown_val = group_data.get("cooldown_seconds", 0)
             cooldown_info = f"`{cooldown_val}s`" if cooldown_val > 0 else "None"
 
+            msg_link = build_message_link(chat, chat_id, sent_message.id)
+            buttons = [[Button.url("🔗 View Message", msg_link)]] if msg_link else None
+
             success_msg = (
                 f"✅ **Post Successful!**\n\n"
                 f"📌 **Group:** {group_title}\n"
                 f"🆔 **ID:** `{chat_id}`\n"
                 f"📎 **Link Type:** {link_badge}\n"
                 f"📝 **Post Mode:** {mode_badge}\n"
-                f"⏱️ **Cooldown:** {cooldown_info}\n"
-                f"📨 **Message ID:** `{sent_message.id}`"
+                f"⏱️ **Cooldown:** {cooldown_info}"
             )
             logger.info(f"SUCCESS: Posted to '{group_title}' ({chat_id}) using link type '{link_type}'")
-            await notify_admin(success_msg)
+            sent_alert = await notify_admin(success_msg, buttons=buttons)
+            schedule_message_cleanup(sent_alert, delay=600.0)
 
         except SlowModeWaitError as e:
             # Telegram slowmode cooldown triggered
@@ -120,7 +130,8 @@ async def post_to_single_group(
                 f"🔄 Next post automatically rescheduled after cooldown."
             )
             logger.warning(f"SLOWMODE: Post to '{group_title}' ({chat_id}) delayed for {e.seconds}s")
-            await notify_admin(err_msg)
+            sent_alert = await notify_admin(err_msg)
+            schedule_message_cleanup(sent_alert, delay=10.0)
 
         except FloodWaitError as e:
             # Reschedule far in advance (6 hours)
