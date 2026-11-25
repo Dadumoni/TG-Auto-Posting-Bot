@@ -16,7 +16,12 @@ from bot.database import (
     get_all_groups_db,
 )
 from bot.services import post_to_single_group, calculate_next_post_timestamp
-from bot.utils import parse_chat_target, resolve_chat_entity, detect_group_cooldown
+from bot.utils import (
+    parse_chat_target,
+    resolve_chat_entity,
+    detect_group_cooldown,
+    schedule_message_cleanup,
+)
 
 
 def escape_md(text: str) -> str:
@@ -51,6 +56,7 @@ async def process_add_group(event, raw_target, source_desc=""):
                 f"📌 **Title:** {group_title}\n"
                 f"🆔 **ID:** `{chat_id}`"
             )
+            schedule_message_cleanup(status_msg, event, delay=10.0)
             return
 
         # Detect native Telegram slowmode/cooldown timer
@@ -95,6 +101,8 @@ async def process_add_group(event, raw_target, source_desc=""):
             f"📎 **Initial Link Policy:** `t.me only`\n\n"
             f"{status_note}"
         )
+        # Clean up confirmation status and user's /add_group command after 10 seconds
+        schedule_message_cleanup(status_msg, event, delay=10.0)
 
         # Prompt Admin via interactive inline buttons to choose supported link type (Step 1 of 2)
         prompt_text = (

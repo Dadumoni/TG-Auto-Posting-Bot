@@ -21,7 +21,12 @@ from bot.database import (
     clear_flood_safety_lock,
 )
 from bot.services.emergency import cancel_flood_updater_task
-from bot.utils import parse_chat_target, resolve_chat_entity, detect_group_cooldown
+from bot.utils import (
+    parse_chat_target,
+    resolve_chat_entity,
+    detect_group_cooldown,
+    schedule_message_cleanup,
+)
 
 # In-memory storage for interactive /set_message link prompt flow
 pending_link_config = {}
@@ -35,17 +40,6 @@ def is_user_waiting_input(user_id: int) -> bool:
 def _is_authorized(event) -> bool:
     """Verify sender is authorized admin when ADMIN_ID is configured."""
     return ADMIN_ID == 0 or event.sender_id == ADMIN_ID
-
-
-async def _delayed_delete(*messages, delay: float = 2.0):
-    """Auto-delete temporary setup messages after a short delay."""
-    await asyncio.sleep(delay)
-    for msg in messages:
-        if msg is not None:
-            try:
-                await msg.delete()
-            except Exception as e:
-                logger.debug(f"Auto-delete skipped: {e}")
 
 
 def register_command_handlers(bot_instance=None):
@@ -317,7 +311,7 @@ def register_command_handlers(bot_instance=None):
             return
 
         logger.info(f"[CMD] /set_message updated '{target}' via interactive flow")
-        asyncio.create_task(_delayed_delete(prompt_msg, event, saved_msg, delay=2.0))
+        schedule_message_cleanup(prompt_msg, event, saved_msg, delay=2.0)
         raise events.StopPropagation
 
     @target_bot.on(events.NewMessage(pattern=r'(?i)^/set_tme_message(?:@\w+)?(?:\s|$)'))
