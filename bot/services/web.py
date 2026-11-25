@@ -1,5 +1,5 @@
 import asyncio
-from aiohttp import web, ClientSession
+from aiohttp import web, ClientSession, ClientTimeout
 from bot.config import PORT, APP_URL, PING_INTERVAL_SECONDS, logger
 
 
@@ -37,10 +37,10 @@ async def auto_ping_server():
     # Initial brief pause so the web server finishes binding before the first ping
     await asyncio.sleep(5)
 
+    timeout = ClientTimeout(total=15)
     while True:
         try:
-            timeout = ClientSession(timeout=web.ClientTimeout(total=15))
-            async with timeout as session:
+            async with ClientSession(timeout=timeout) as session:
                 async with session.get(ping_url) as response:
                     if response.status == 200:
                         logger.info(f"Self-ping successful: {ping_url} returned status {response.status}")
