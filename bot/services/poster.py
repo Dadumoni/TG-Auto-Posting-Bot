@@ -19,6 +19,7 @@ from bot.database import (
     get_group_db,
     update_group_schedule,
     update_group_cooldown,
+    mark_group_failure_pending,
     generate_group_post,
 )
 from bot.utils import (
@@ -85,9 +86,14 @@ async def post_to_single_group(
         if group_data is None:
             group_data = get_group_db(chat_id) or {}
 
+        if group_data.get("awaiting_admin_action"):
+            logger.info(f"Skipping post to '{group_title}' ({chat_id}): Awaiting admin failure confirmation.")
+            return False
+
         link_type = group_data.get("link_type", "t_me")
         allow_text = group_data.get("allow_text", True)
         success = False
+        clear_failure = False
         post_timestamp = time.time()
         next_post_at = calculate_next_post_timestamp(group_data)
 
@@ -97,6 +103,7 @@ async def post_to_single_group(
             sent_message = await user.send_message(chat, post_text)
 
             success = True
+            clear_failure = True
             link_badge = "🔗 t.me only" if link_type == "t_me" else "🌐 Domain / External"
             mode_badge = "✅ Text + Emojis" if allow_text else "🚫 Link Only"
             cooldown_val = group_data.get("cooldown_seconds", 0)
@@ -119,6 +126,7 @@ async def post_to_single_group(
 
         except SlowModeWaitError as e:
             # Telegram slowmode cooldown triggered
+            clear_failure = True
             update_group_cooldown(chat_id, e.seconds)
             next_post_at = time.time() + e.seconds + random.randint(30, 90)
 
@@ -135,6 +143,7 @@ async def post_to_single_group(
 
         except FloodWaitError as e:
             # Reschedule far in advance (6 hours)
+            clear_failure = True
             next_post_at = time.time() + 21600
             logger.error(f"FAILED: Post to '{group_title}' ({chat_id}) - FloodWait: {e.seconds}s. Enforcing 6-hour emergency lock.")
             from bot.services.emergency import trigger_flood_emergency_lock
@@ -147,6 +156,7 @@ async def post_to_single_group(
         except Exception as e:
             logger.error(f"FAILED: Post to '{group_title}' ({chat_id}) - {type(e).__name__}: {str(e)}")
             diag = await diagnose_group_failure(chat_id, e)
+            mark_group_failure_pending(chat_id, diag["reason"])
             star_badge = " ⭐ (Paid Messages Required)" if diag.get("stars_detected") else ""
             banned_badge = " 🚫 (Banned / Kicked)" if diag.get("banned") else ""
 
@@ -161,10 +171,21 @@ async def post_to_single_group(
                 f"💡 **Recommended Action:**\n"
                 f"{diag['recommendation']}"
             )
-            await notify_admin(err_msg)
+            fail_buttons = [
+                [
+                    Button.inline("♻️ Retry After 6 Hours", data=f"failact:retry6h:{chat_id}"),
+                    Button.inline("🗑️ Remove Group", data=f"failact:remove:{chat_id}"),
+                ]
+            ]
+            await notify_admin(err_msg, buttons=fail_buttons)
 
         finally:
-            update_group_schedule(chat_id, last_posted=post_timestamp, next_post_at=next_post_at)
+            update_group_schedule(
+                chat_id,
+                last_posted=post_timestamp,
+                next_post_at=next_post_at,
+                clear_failure=clear_failure,
+            )
             # Add human random pause between group posts
             human_pause = POST_DELAY_SECONDS + random.uniform(1.0, 3.0)
             await asyncio.sleep(human_pause)

@@ -38,6 +38,10 @@ async def auto_post_scheduler():
                     logger.info("Scheduler cycle halted mid-pass due to FloodLock or /stop.")
                     break
 
+                # Skip group while awaiting admin confirmation on a failed post
+                if group.get("awaiting_admin_action"):
+                    continue
+
                 chat_id = group.get("chat_id")
                 title = group.get("title", "Group")
                 last_posted = group.get("last_posted", 0)

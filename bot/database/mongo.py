@@ -422,6 +422,8 @@ def add_group_db(
         "link_type": link_type,
         "allow_text": bool(allow_text),
         "next_post_at": next_post_at if next_post_at is not None else now,
+        "awaiting_admin_action": False,
+        "last_failure_reason": "",
     }
     try:
         groups_collection.update_one(
@@ -481,18 +483,99 @@ def update_group_cooldown(chat_id: int, cooldown_seconds: int) -> bool:
         return False
 
 
-def update_group_schedule(chat_id: int, last_posted: float, next_post_at: float) -> bool:
-    """Update both last_posted and next_post_at timestamps for a group."""
+def update_group_schedule(
+    chat_id: int,
+    last_posted: float,
+    next_post_at: float,
+    clear_failure: bool = False,
+) -> bool:
+    """Update last_posted and next_post_at timestamps, optionally clearing failure hold state."""
+    if groups_collection is None:
+        return False
+    update_fields: Dict[str, Any] = {
+        "last_posted": last_posted,
+        "next_post_at": next_post_at,
+    }
+    if clear_failure:
+        update_fields["awaiting_admin_action"] = False
+        update_fields["last_failure_reason"] = ""
+    try:
+        groups_collection.update_one(
+            {"chat_id": chat_id},
+            {"$set": update_fields},
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error updating schedule for group {chat_id}: {e}")
+        return False
+
+
+def mark_group_failure_pending(chat_id: int, reason: str) -> bool:
+    """Pause posting to a failed group until admin confirms Retry 6h or Remove Group."""
     if groups_collection is None:
         return False
     try:
         groups_collection.update_one(
             {"chat_id": chat_id},
-            {"$set": {"last_posted": last_posted, "next_post_at": next_post_at}},
+            {
+                "$set": {
+                    "awaiting_admin_action": True,
+                    "last_failure_reason": reason,
+                    "last_failed_at": time.time(),
+                }
+            },
         )
         return True
     except Exception as e:
-        logger.error(f"Error updating schedule for group {chat_id}: {e}")
+        logger.error(f"Error marking failure pending for group {chat_id}: {e}")
+        return False
+
+
+def set_group_retry_6h(chat_id: int, admin_id: int = 0) -> Optional[float]:
+    """Pause group posting for 6 hours and schedule automatic retry afterward."""
+    if groups_collection is None:
+        return None
+    now = time.time()
+    retry_at = now + (6 * 3600)
+    try:
+        groups_collection.update_one(
+            {"chat_id": chat_id},
+            {
+                "$set": {
+                    "awaiting_admin_action": False,
+                    "next_post_at": retry_at,
+                    "last_action": "retry_6h",
+                    "action_updated_at": now,
+                    "action_by": admin_id,
+                }
+            },
+        )
+        return retry_at
+    except Exception as e:
+        logger.error(f"Error setting 6-hour retry for group {chat_id}: {e}")
+        return None
+
+
+def record_failure_action_db(chat_id: int, action: str, admin_id: int = 0) -> bool:
+    """Persist admin's failure-resolution click decision in config collection."""
+    if config_collection is None:
+        return False
+    try:
+        config_collection.update_one(
+            {"type": "failure_action_last", "chat_id": chat_id},
+            {
+                "$set": {
+                    "chat_id": chat_id,
+                    "action": action,
+                    "admin_id": admin_id,
+                    "updated_at": time.time(),
+                }
+            },
+            upsert=True,
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error recording failure action for group {chat_id}: {e}")
         return False
 
 
