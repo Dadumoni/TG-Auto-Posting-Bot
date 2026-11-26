@@ -11,6 +11,8 @@ from bot.database import (
     add_group_db,
     update_group_link_type,
     update_group_text_policy,
+    set_group_retry_6h,
+    record_failure_action_db,
     remove_group_db,
     remove_all_groups_db,
     get_all_groups_db,
@@ -211,7 +213,12 @@ def _format_group_detail(group: dict, index_num: int) -> str:
     next_post_at = group.get("next_post_at", current_time)
     remaining_secs = max(0, int(next_post_at - current_time))
     time_left_mins = remaining_secs // 60
-    next_label = f"in ~{time_left_mins}m ({remaining_secs}s)" if remaining_secs > 0 else "due now"
+    if group.get("awaiting_admin_action"):
+        next_label = "⏸️ Awaiting admin confirmation"
+    elif remaining_secs > 0:
+        next_label = f"in ~{time_left_mins}m ({remaining_secs}s)"
+    else:
+        next_label = "due now"
 
     allow_text = group.get("allow_text", True)
     text_badge = "✅ Text+Emoji" if allow_text else "🚫 Link Only"
@@ -289,6 +296,39 @@ def register_group_handlers(bot):
                 logger.debug(f"Could not delete policy prompt message: {del_err}")
         except Exception as e:
             logger.error(f"Error in text_policy_callback: {e}")
+
+    @bot.on(events.CallbackQuery(pattern=r'^failact:(retry6h|remove):(-?\d+)$'))
+    async def failure_action_callback(event):
+        """Handle admin decision (Retry After 6 Hours or Remove Group) on failed post alerts."""
+        try:
+            if not _is_authorized(event):
+                await event.answer("⚠️ Unauthorized. Only the bot admin can take action.", alert=True)
+                return
+
+            raw_act = event.pattern_match.group(1)
+            action = raw_act.decode("utf-8") if isinstance(raw_act, bytes) else str(raw_act)
+            chat_id = int(event.pattern_match.group(2))
+
+            if action == "retry6h":
+                if not is_group_exists(chat_id):
+                    await event.answer("⚠️ Group is no longer in the database.", alert=True)
+                else:
+                    retry_at = set_group_retry_6h(chat_id, admin_id=event.sender_id)
+                    record_failure_action_db(chat_id, "retry_6h", admin_id=event.sender_id)
+                    logger.info(f"[FAILURE-ACTION] Group {chat_id} paused for 6 hours (retry_at={retry_at})")
+                    await event.answer("♻️ Paused for 6 hours. Will retry automatically after 6h.")
+            elif action == "remove":
+                removed = remove_group_db(chat_id)
+                record_failure_action_db(chat_id, "remove_group", admin_id=event.sender_id)
+                logger.info(f"[FAILURE-ACTION] Group {chat_id} removed from DB (existed={removed})")
+                await event.answer("🗑️ Group removed from database.")
+
+            try:
+                await event.delete()
+            except Exception as del_err:
+                logger.debug(f"Could not delete failed alert message: {del_err}")
+        except Exception as e:
+            logger.error(f"Error in failure_action_callback: {e}")
 
     @bot.on(events.NewMessage(pattern=r'(?i)^/add_group(?:@\w+)?(?:\s|$)'))
     async def add_group_cmd(event):
