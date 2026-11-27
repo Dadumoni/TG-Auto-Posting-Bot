@@ -418,6 +418,8 @@ def add_group_db(
     update_data: Dict[str, Any] = {
         "title": title,
         "last_posted": now,
+        "last_success_at": 0,
+        "total_posts": 0,
         "cooldown_seconds": cooldown_seconds,
         "link_type": link_type,
         "allow_text": bool(allow_text),
@@ -488,8 +490,9 @@ def update_group_schedule(
     last_posted: float,
     next_post_at: float,
     clear_failure: bool = False,
+    increment_post_count: bool = False,
 ) -> bool:
-    """Update last_posted and next_post_at timestamps, optionally clearing failure hold state."""
+    """Update last_posted and next_post_at timestamps, optionally clearing failure or incrementing post count."""
     if groups_collection is None:
         return False
     update_fields: Dict[str, Any] = {
@@ -499,10 +502,17 @@ def update_group_schedule(
     if clear_failure:
         update_fields["awaiting_admin_action"] = False
         update_fields["last_failure_reason"] = ""
+    if increment_post_count:
+        update_fields["last_success_at"] = last_posted
+
+    update_ops: Dict[str, Any] = {"$set": update_fields}
+    if increment_post_count:
+        update_ops["$inc"] = {"total_posts": 1}
+
     try:
         groups_collection.update_one(
             {"chat_id": chat_id},
-            {"$set": update_fields},
+            update_ops,
         )
         return True
     except Exception as e:

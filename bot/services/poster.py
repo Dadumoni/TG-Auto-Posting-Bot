@@ -62,11 +62,12 @@ async def post_to_single_group(
     chat_id: int,
     group_title: str,
     group_data: Optional[Dict[str, Any]] = None,
+    force_link_only_tme: bool = False,
 ) -> bool:
     """
     Send the configured promotional post to a single Telegram group using the Userbot.
-    Enforces sequential posting via posting_lock, human-randomized scheduling,
-    and slowmode cooldown handling.
+    When force_link_only_tme=True (used on newly added groups), sends only the single t.me link
+    without custom text, emojis, or multiple links.
     """
     async with posting_lock:
         if is_flood_locked():
@@ -90,10 +91,16 @@ async def post_to_single_group(
             logger.info(f"Skipping post to '{group_title}' ({chat_id}): Awaiting admin failure confirmation.")
             return False
 
-        link_type = group_data.get("link_type", "t_me")
-        allow_text = group_data.get("allow_text", True)
+        if force_link_only_tme:
+            link_type = "t_me"
+            allow_text = False
+        else:
+            link_type = group_data.get("link_type", "t_me")
+            allow_text = group_data.get("allow_text", True)
+
         success = False
         clear_failure = False
+        increment_count = False
         post_timestamp = time.time()
         next_post_at = calculate_next_post_timestamp(group_data)
 
@@ -104,8 +111,12 @@ async def post_to_single_group(
 
             success = True
             clear_failure = True
+            increment_count = True
             link_badge = "🔗 t.me only" if link_type == "t_me" else "🌐 Domain / External"
-            mode_badge = "✅ Text + Emojis" if allow_text else "🚫 Link Only"
+            if force_link_only_tme:
+                mode_badge = "🚫 Single t.me Link (Initial)"
+            else:
+                mode_badge = "✅ Text + Emojis" if allow_text else "🚫 Link Only"
             cooldown_val = group_data.get("cooldown_seconds", 0)
             cooldown_info = f"`{cooldown_val}s`" if cooldown_val > 0 else "None"
 
@@ -185,6 +196,7 @@ async def post_to_single_group(
                 last_posted=post_timestamp,
                 next_post_at=next_post_at,
                 clear_failure=clear_failure,
+                increment_post_count=increment_count,
             )
             # Add human random pause between group posts
             human_pause = POST_DELAY_SECONDS + random.uniform(1.0, 3.0)
