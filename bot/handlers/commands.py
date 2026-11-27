@@ -92,13 +92,14 @@ def register_command_handlers(bot_instance=None):
 
             set_bot_posting_status(False)
             logger.info(f"[CMD] /stop executed by {event.sender_id}")
-            await event.respond(
+            resp_msg = await event.respond(
                 "🛑 **Auto-Posting Paused!**\n\n"
                 "The bot has been stopped and will **not** post to any group.\n"
                 "• All automatic scheduler cycles are paused.\n"
                 "• Any newly added groups will be registered but won't receive posts until resumed.\n\n"
                 "💡 _Use `/restart` or `/resume` to resume auto-posting at any time._"
             )
+            schedule_message_cleanup(resp_msg, event, delay=10.0)
         except Exception as e:
             logger.error(f"Error in stop_cmd: {e}")
             await event.respond(f"❌ Failed to stop auto-posting: `{e}`")
@@ -120,13 +121,14 @@ def register_command_handlers(bot_instance=None):
 
             set_bot_posting_status(True)
             logger.info(f"[CMD] /restart executed by {event.sender_id}")
-            await event.respond(
+            resp_msg = await event.respond(
                 "▶️ **Auto-Posting Resumed & Restarted!**\n\n"
                 "The bot is now fully active.\n"
                 "• Scheduled posts will continue according to their randomized intervals.\n"
                 f"• Cooldowns and link type policies remain fully enforced.{lock_note}\n\n"
                 "💡 _Use `/stop` to pause posting whenever needed._"
             )
+            schedule_message_cleanup(resp_msg, event, delay=10.0)
         except Exception as e:
             logger.error(f"Error in restart_cmd: {e}")
             await event.respond(f"❌ Failed to restart auto-posting: `{e}`")
