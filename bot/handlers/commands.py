@@ -20,7 +20,7 @@ from bot.database import (
     get_flood_safety_lock,
     clear_flood_safety_lock,
 )
-from bot.services.emergency import cancel_flood_updater_task
+from bot.services.emergency import cancel_flood_updater_task, extend_flood_cooloff_6h
 from bot.utils import (
     parse_chat_target,
     resolve_chat_entity,
@@ -130,6 +130,35 @@ def register_command_handlers(bot_instance=None):
         except Exception as e:
             logger.error(f"Error in restart_cmd: {e}")
             await event.respond(f"❌ Failed to restart auto-posting: `{e}`")
+
+    @target_bot.on(events.CallbackQuery(pattern=r'^floodcool:(wait6h|restart)$'))
+    async def flood_cooloff_callback(event):
+        """Handle Ok (Wait 6h) or Restart inline buttons on 6-hour cooloff completion."""
+        try:
+            if not _is_authorized(event):
+                await event.answer("⚠️ Unauthorized.", alert=True)
+                return
+
+            raw_act = event.pattern_match.group(1)
+            action = raw_act.decode("utf-8") if isinstance(raw_act, bytes) else str(raw_act)
+
+            if action == "wait6h":
+                msg_id = getattr(event, "message_id", 0) or 0
+                await extend_flood_cooloff_6h(alert_msg_id=msg_id)
+                logger.info("[FLOOD-COOLOFF] Admin chose Ok: waiting another 6 hours.")
+                await event.answer("⏳ Waiting another 6 hours before next check.")
+            elif action == "restart":
+                clear_flood_safety_lock()
+                cancel_flood_updater_task()
+                set_bot_posting_status(True)
+                logger.info("[FLOOD-COOLOFF] Admin chose Restart: auto-posting resumed.")
+                await event.answer("▶️ Auto-posting restarted!")
+                try:
+                    await event.delete()
+                except Exception as del_err:
+                    logger.debug(f"Could not delete cooloff prompt: {del_err}")
+        except Exception as e:
+            logger.error(f"Error in flood_cooloff_callback: {e}")
 
     @target_bot.on(events.NewMessage(pattern=r'(?i)^/debug(?:@\w+)?(?:\s|$)'))
     async def debug_cmd(event):
